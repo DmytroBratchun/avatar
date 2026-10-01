@@ -65,9 +65,15 @@ Note that `POST /api/sources` and `/scan-folder` create sources as `pending`, wh
 
 Each worker writes a heartbeat JSON to `backend/data/` every 10s; `api/worker.py` reports a worker as stopped when the heartbeat is older than 30s.
 
+### Universes
+
+A universe (`services/universes.py`) is a group of shows and films set in the same fictional world. Everything a prompt needs to know about a particular world is data on the universe - name, one-paragraph description, member shows, the word for a season, a closed list of regions, what each region's scenery looks like - so the prompts stay generic and a new world is one new entry, not rewritten prompts. Entries live in `backend/data/universes.json` (created from built-in defaults on first use); a show no universe claims gets a bare universe of its own, so nothing from another world leaks into its prompts. Don't hard-code show names, nations or world knowledge into prompts - read them from the universe.
+
 ### Captioning providers
 
 `stages/caption.py` has three providers, chosen at call time: `claude_code` (default - shells out to headless `claude -p` with a JSON schema, billed to the Claude subscription), `api` (Anthropic SDK with a forced tool call, metered), and `local` (Ollama; uses a deliberately narrower prompt/schema because small VLMs invent character names and plot). `stages/episode_summary.py` reuses the same provider switch.
+
+The caption schema is built per universe (`build_caption_schema`). Tags exist only for exact filtering, so there are two kinds: `character_tags`, and location as two fields - `region` (an enum of the universe's regions, stored in `Scene.region`) and `place_tags` (optional named place at city level, stored in `Scene.location_tags`). Free-form mood/action tags are no longer requested (`mood_action_tags` stays in the table for old captions). The "known names" hint sent with each call is the 20 most used characters and places of that universe; places are taken only from scenes captioned with the region prompt, because older location tags mix levels of detail.
 
 `Scene.model_version` is written as `provider:model:caption-<hash>`, where the hash is derived from the prompt + schema - editing either changes it automatically, which is how stale-prompt scenes are found.
 
@@ -91,7 +97,21 @@ The dimensions are hard-coded to those models; changing `text_embedding_model` /
 
 ### Schema changes
 
-There are no migrations (alembic is in requirements but unused). `init_db()` only calls `create_all`, which creates missing tables but never alters existing ones - adding a column to a model requires a manual `ALTER TABLE` on the existing DB.
+There are no migrations (alembic is in requirements but unused). `init_db()` calls `create_all`, which creates missing tables but never alters existing ones - a column added to an existing model must also be added with `_ensure_column(...)` in `init_db()` (`db/session.py`), as `scenes.region` is.
+
+### Video editor (in progress)
+
+`backend/app/editor/` + `api/editor.py` + the Editor tab turn a narration audio file into a video built from indexed footage. It is a separate module that only reads the index - it never writes to `avatar.db`. A project belongs to one universe and takes footage only from that universe's shows (all of them, or the ones picked for the project). State lives on disk: one folder per project under a user-chosen root (`editor_projects_root` in `backend/data/settings.json`) holding `project.json`, `transcript.json` (word timings) and the audio.
+
+Stages (`editor/stages.py`) run one at a time per project on a background thread (`editor/jobs.py`); progress is written to `project.json` and the UI polls it. Implemented so far: `transcribe` (word timestamps, script proper nouns passed to Whisper as hotwords) and `beats` (one headless Claude call via `editor/llm.py`, no explicit model). Beats tile the timeline with no gaps and are split into slots of at most 5s, one clip each. `queries` (one Claude call per 40 beats) writes two queries per slot - a narrative one for the caption index and a no-names frame description for the visual index; `select` (`editor/footage.py`, free) searches both, scores hits as z-scores against a random sample of each index so the two are comparable, and assigns clips in narration order without reusing a scene. Each slot keeps 8 candidates; a slot the user picks or re-searches is locked and survives re-runs. Candidates store file path + times, not just scene ids, because re-indexing recreates scenes. The timeline is a list of segments, not the audio file's clock, because quote clips with their own audio will be inserted later. 
+
+`render` (`editor/render.py`) outputs 1920x1080 H.264 at 24000/1001 fps. Each slot is encoded to its own file in `<project>/segments/`, named by a hash of everything that affects its pixels, then the segments are concatenated without re-encoding and the narration is muxed in - so a re-render only encodes what changed (bump `ENCODE_VERSION` after changing the filter graph). Segment lengths are computed from absolute frame positions so rounding never drifts against the audio. Two layouts: `simple` (clip fills the screen) and `framed` (clip in a window over a blurred, darkened background, with a frame PNG from `<projects root>/_frames/` overlaid on top; the window is detected from the PNG's transparent opening). Some source files are 4:3 inside a 16:9 file with baked-in black bars - `source_crop()` detects this once per file (cached in `backend/data/editor_crop_cache.json`). 
+
+`background` (`editor/background.py`) picks one calm scenery shot per beat for the framed layout: one Claude call writes a no-names scenery description per beat, then a visual search runs only over scenes whose indexed keyframe looks like empty scenery (top 6% by a zero-shot scenery-vs-characters score computed from the vectors already in the index; near-black keyframes are skipped). Only the single shot around that keyframe is used, and each beat gets several shots (enough to cover its length with spare). At render time `editor/bgtrack.py` lays them end to end at normal speed with ~0.8s cross-fades into one continuous 480x270 track on the video clock (quotes included), built from small cached pieces - the part of each shot that plays alone and each cross-fade - then concatenated; clips seek into that track and blur/dim it when compositing. Without chosen scenery the background falls back to a blurred copy of the foreground clip.
+
+`quotes` (`editor/quotes.py`) proposes lines of dialogue to drop into the narration: Claude says what line it wants and after which sentence, the description is searched in the transcript-chunk index, Claude picks exact `TranscriptLine` ids from the retrieved excerpts (or nothing), and the fragment is re-transcribed with word timestamps to find the exact cut, since the index only has line-level timings. Quotes are proposals until the user approves them. An approved quote plays with its own audio between two beats and lengthens the video; beat and slot times stay on the narration clock, and the renderer splices quote segments and audio in at beat boundaries (cut on the same frame for video and audio). Once beats exist, a quote's position snaps to the nearest beat boundary; the beats stage splits beats at quote positions. Quote search only covers episodes that have an episode summary and embedded transcript chunks.
+
+`test-data/` (git-ignored) holds a sample narration, script and frame image for developing this.
 
 ### Frontend
 

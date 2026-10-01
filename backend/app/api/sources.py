@@ -204,6 +204,25 @@ def dequeue(source_id: int, db: Session = Depends(get_db)) -> Source:
     return source
 
 
+@router.post("/{source_id}/prepare", response_model=SourceOut)
+def prepare_source(source_id: int, visual: bool = True, db: Session = Depends(get_db)) -> Source:
+    """Queues only the free local work for this source - transcription, shots,
+    scenes, keyframes, transcript chunks and (by default) the visual index. The
+    local worker inside the backend does it; nothing is sent to an LLM and the
+    source ends at 'ready_for_captioning'. Stages already done are skipped."""
+    source = db.get(Source, source_id)
+    if source is None:
+        raise HTTPException(404, "Source not found")
+    source.status = "paused"
+    source.error_message = None
+    source.current_stage_detail = None
+    if visual:
+        source.visual_reindex_requested = True
+    db.flush()
+    db.refresh(source)
+    return source
+
+
 @router.post("/{source_id}/reindex-visual", response_model=SourceOut)
 def reindex_visual(source_id: int, db: Session = Depends(get_db)) -> Source:
     """Queues visual-only (CLIP) reindexing for this source - off existing keyframes,

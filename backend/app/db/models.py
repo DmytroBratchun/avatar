@@ -99,6 +99,8 @@ class Scene(Base):
     visual_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     context_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     character_tags: Mapped[list] = mapped_column(JSON, default=list)
+    # which part of the universe's world this is - one of the universe's regions
+    region: Mapped[str | None] = mapped_column(String, nullable=True)
     location_tags: Mapped[list] = mapped_column(JSON, default=list)
     mood_action_tags: Mapped[list] = mapped_column(JSON, default=list)
     linked_transcript_ids: Mapped[list] = mapped_column(JSON, default=list)

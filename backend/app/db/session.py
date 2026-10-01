@@ -28,9 +28,18 @@ def _load_sqlite_vec(dbapi_connection: sqlite3.Connection, _connection_record) -
     dbapi_connection.execute("PRAGMA foreign_keys = ON")
 
 
+def _ensure_column(conn, table: str, column: str, ddl: str) -> None:
+    """create_all never alters an existing table, so a column added to a model
+    after the database was created has to be added by hand."""
+    existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+
+
 def init_db() -> None:
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
+        _ensure_column(conn, "scenes", "region", "VARCHAR")
         conn.exec_driver_sql(
             "CREATE VIRTUAL TABLE IF NOT EXISTS scene_text_vec "
             "USING vec0(scene_id INTEGER PRIMARY KEY, embedding FLOAT[1024])"

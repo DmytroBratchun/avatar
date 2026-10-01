@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import os
 import subprocess
 import time
@@ -11,10 +12,25 @@ from sqlalchemy.orm import Session
 from app.config import BACKEND_DIR, settings
 from app.db.models import Scene, Source, TranscriptLine
 from app.services.runtime_settings import current_anthropic_api_key, current_caption_model, current_caption_provider
+from app.services.universes import Universe, universe_for_show
 
-CAPTION_SCHEMA = {
-    "type": "object",
-    "properties": {
+logger = logging.getLogger(__name__)
+
+# This many scenes failing in a row means captioning itself is down (usage limit
+# reached, CLI logged out, no network) rather than something about one scene.
+MAX_CONSECUTIVE_FAILURES = 5
+
+
+class CaptioningUnavailable(Exception):
+    """Raised to stop captioning instead of failing every remaining scene."""
+
+def build_caption_schema(universe: Universe) -> dict:
+    """What the model returns for a scene. Tags exist for exact filtering - who is
+    in the scene and where it is - so there are only two kinds, both narrow.
+    Everything else about the scene belongs in the descriptions, which are searched
+    by meaning. (Free-form mood/action tags were dropped: thousands of one-off tags
+    filter nothing.)"""
+    properties = {
         "visual_description": {
             "type": "string",
             "description": "Literal, generic description of what is visually happening (one sentence).",
@@ -22,56 +38,50 @@ CAPTION_SCHEMA = {
         "context_description": {
             "type": "string",
             "description": (
-                "Specific narrative description using character names and plot context, "
-                "e.g. 'Azula attacks Aang during the solar eclipse invasion'. Not generic."
+                "Specific narrative description of this moment using character names and plot context - "
+                "who does what to whom, and why it matters in the story. Not generic."
             ),
         },
         "character_tags": {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "One array entry per character who appears, e.g. ['Aang', 'Katara', 'Sokka'] - never combine "
-                "multiple characters into a single comma-separated entry. Use the same name each time a "
-                "recurring named character appears (reuse spelling/capitalization from the known-tags hint "
-                "below when given)."
+                "One entry per named character who appears in the scene. Use each character's usual name, "
+                "spelled the same way every time (reuse the spelling from the known characters below when "
+                "given). Never combine several characters into one entry. Leave out unnamed extras."
             ),
         },
-        "location_tags": {
+        "place_tags": {
             "type": "array",
             "items": {"type": "string"},
             "description": (
-                "One array entry per distinct location, e.g. ['Southern Water Tribe village', 'ice cliffs'] - "
-                "never combine multiple locations into a single comma-separated entry. Reuse the same spelling "
-                "each time a recurring location appears."
+                "The named place where this scene happens, or an empty list. Use the name the show itself "
+                "uses for a city, village, island, temple, ship or landmark. Stay at the level of the place, "
+                "not a spot inside it: the city, not a street, room or building in it - details belong in "
+                "the description. One place per scene; two only if the scene clearly moves between two "
+                "named places. Leave it empty when the place has no name in the show (a forest, a road, "
+                "open sea, a cave) or when you cannot tell where this is - do not describe the scenery here "
+                "and do not guess. A dream, vision or flashback is not a place: give where it is shown to "
+                "happen, or nothing. Reuse the exact spelling of a known place below when one applies."
             ),
         },
-        "mood_action_tags": {
-            "type": "array",
-            "items": {"type": "string"},
+    }
+    required = ["visual_description", "context_description", "character_tags", "place_tags"]
+    if universe.regions:
+        properties["region"] = {
+            "type": "string",
+            "enum": universe.regions,
             "description": (
-                "One array entry per tag, e.g. ['firebending', 'betrayal', 'comic-relief', 'grief'] - never "
-                "combine multiple tags into a single comma-separated entry."
-            ),
-        },
-    },
-    "required": [
-        "visual_description",
-        "context_description",
-        "character_tags",
-        "location_tags",
-        "mood_action_tags",
-    ],
-}
+                "The part of the world this scene takes place in. " + universe.region_notes
+            ).strip(),
+        }
+        required.append("region")
+    return {"type": "object", "properties": properties, "required": required}
 
-CAPTION_TOOL = {
-    "name": "record_scene_description",
-    "description": "Record a structured description of a scene from a TV show or film.",
-    "input_schema": CAPTION_SCHEMA,
-}
 
 INSTRUCTION_TEXT = (
     "Describe this scene: what's literally visible, a specific narrative description using character "
-    "names and plot context (not generic), which characters/locations appear, and mood/action tags."
+    "names and plot context (not generic), which named characters appear, and where it takes place."
 )
 
 # --- local-model variant: small open VLMs confidently invent character names, episode
@@ -156,34 +166,59 @@ def _prompt_version(schema: dict, instruction: str) -> str:
 
 
 def _episode_primer(source: Source) -> str:
-    show = source.show_title or "this show"
-    return (
-        f"This is a scene from {show}, Book {source.book}, "
-        f"Episode {source.episode_number} ('{source.episode_title}')."
-    )
+    """One or two sentences telling the model what it is looking at. A film has no
+    season or episode, so those parts are only mentioned when they exist."""
+    universe = universe_for_show(source.show_title)
+    where = source.show_title or "this show"
+    if source.book is not None:
+        where += f", {universe.season_word} {source.book}"
+    if source.episode_number is not None:
+        where += f", Episode {source.episode_number}"
+    if source.episode_title:
+        where += f" ('{source.episode_title}')"
+    primer = f"This is a scene from {where}."
+    if universe.description:
+        primer += f" {universe.description}"
+    return primer
 
 
-def build_tag_hint(db: Session, max_per_field: int = 60) -> str:
-    """Existing location/mood tags already in the DB, so captioning reuses the same
-    spelling/casing instead of inventing near-duplicate variants scene to scene."""
+HINT_SIZE = 20
 
-    def distinct_values(column: str) -> list[str]:
-        rows = db.execute(
-            text(f"SELECT DISTINCT je.value FROM scenes, json_each(scenes.{column}) je ORDER BY je.value")
-        ).all()
-        return [row[0] for row in rows][:max_per_field]
 
-    locations = distinct_values("location_tags")
-    moods = distinct_values("mood_action_tags")
-    if not locations and not moods:
+def build_tag_hint(db: Session, universe: Universe) -> str:
+    """The most used character and place names in this universe, so new captions
+    spell them the same way. Deliberately short: the commonest names are the ones
+    worth repeating, and a long list teaches the model to add to it.
+
+    Places are taken only from scenes captioned with the region/place prompt -
+    older captions tagged locations at every level of detail and would teach the
+    wrong one."""
+    if not universe.shows:
         return ""
+    placeholders = ",".join(f":show{i}" for i in range(len(universe.shows)))
+    params = {f"show{i}": show for i, show in enumerate(universe.shows)}
 
-    parts = ["Tags already used elsewhere in this project - reuse the exact same spelling/casing when one applies, instead of inventing a new variant:"]
-    if locations:
-        parts.append("Known locations: " + ", ".join(locations))
-    if moods:
-        parts.append("Known mood/action tags: " + ", ".join(moods))
-    return "\n".join(parts)
+    def most_used(column: str, extra: str = "") -> list[str]:
+        rows = db.execute(
+            text(
+                f"SELECT je.value, COUNT(*) AS uses FROM scenes, json_each(scenes.{column}) je "
+                f"WHERE scenes.show_title IN ({placeholders}) {extra} "
+                f"GROUP BY je.value ORDER BY uses DESC LIMIT {HINT_SIZE}"
+            ),
+            params,
+        ).all()
+        return [row[0] for row in rows]
+
+    characters = most_used("character_tags")
+    places = most_used("location_tags", "AND scenes.region IS NOT NULL")
+    parts = []
+    if characters:
+        parts.append("Known characters: " + ", ".join(characters))
+    if places:
+        parts.append("Known places: " + ", ".join(places))
+    if not parts:
+        return ""
+    return "\n".join(["Names already in use - keep the exact spelling when one applies:", *parts])
 
 
 # --- provider: direct Anthropic API (needs ANTHROPIC_API_KEY, metered billing) ---
@@ -219,7 +254,9 @@ def _image_block(path: str) -> dict:
     return {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}}
 
 
-def caption_scene_via_api(source: Source, scene: Scene, transcript_text: str, tag_hint: str) -> tuple[dict, float | None]:
+def caption_scene_via_api(
+    source: Source, scene: Scene, transcript_text: str, tag_hint: str, schema: dict
+) -> tuple[dict, float | None]:
     primer = _episode_primer(source)
     if tag_hint:
         primer = f"{primer}\n\n{tag_hint}"
@@ -232,7 +269,13 @@ def caption_scene_via_api(source: Source, scene: Scene, transcript_text: str, ta
     response = _client().messages.create(
         model=model,
         max_tokens=1024,
-        tools=[CAPTION_TOOL],
+        tools=[
+            {
+                "name": "record_scene_description",
+                "description": "Record a structured description of a scene from a TV show or film.",
+                "input_schema": schema,
+            }
+        ],
         tool_choice={"type": "tool", "name": "record_scene_description"},
         messages=[{"role": "user", "content": content}],
     )
@@ -246,7 +289,7 @@ def caption_scene_via_api(source: Source, scene: Scene, transcript_text: str, ta
 
 
 def caption_scene_via_claude_code(
-    source: Source, scene: Scene, transcript_text: str, tag_hint: str
+    source: Source, scene: Scene, transcript_text: str, tag_hint: str, schema: dict
 ) -> tuple[dict, float | None]:
     image_list = "\n".join(f"- {p}" for p in scene.keyframe_paths)
     prompt = (
@@ -266,7 +309,7 @@ def caption_scene_via_claude_code(
             "claude", "-p", prompt,
             "--model", current_caption_model(),
             "--output-format", "json",
-            "--json-schema", json.dumps(CAPTION_SCHEMA),
+            "--json-schema", json.dumps(schema),
             "--tools", "Read",
             "--allowedTools", "Read",
             "--no-session-persistence",
@@ -278,7 +321,10 @@ def caption_scene_via_claude_code(
         timeout=120,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"claude CLI exited {result.returncode}: {result.stderr.strip()[:500]}")
+        # with --output-format json the CLI reports failures (rate limits, auth) on
+        # stdout, leaving stderr empty - include both or the reason is lost
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise RuntimeError(f"claude CLI exited {result.returncode}: {detail[:500]}")
 
     payload = json.loads(result.stdout)
     if payload.get("is_error"):
@@ -325,13 +371,16 @@ def caption_scene_via_local(source: Source, scene: Scene, transcript_text: str, 
     return json.loads(content), None
 
 
-def caption_scene(source: Source, scene: Scene, transcript_text: str, tag_hint: str) -> tuple[dict, float | None]:
+def caption_scene(
+    source: Source, scene: Scene, transcript_text: str, tag_hint: str, schema: dict
+) -> tuple[dict, float | None]:
     provider = current_caption_provider()
     if provider == "claude_code":
-        return caption_scene_via_claude_code(source, scene, transcript_text, tag_hint)
+        return caption_scene_via_claude_code(source, scene, transcript_text, tag_hint, schema)
     if provider == "local":
+        # the local model keeps its own, narrower schema (see LOCAL_CAPTION_SCHEMA)
         return caption_scene_via_local(source, scene, transcript_text, tag_hint)
-    return caption_scene_via_api(source, scene, transcript_text, tag_hint)
+    return caption_scene_via_api(source, scene, transcript_text, tag_hint, schema)
 
 
 def run_captioning(db: Session, source: Source) -> None:
@@ -346,8 +395,11 @@ def run_captioning(db: Session, source: Source) -> None:
     source.status = "captioning"
     db.commit()
 
-    tag_hint = build_tag_hint(db)
+    universe = universe_for_show(source.show_title)
+    caption_schema = build_caption_schema(universe)
+    tag_hint = build_tag_hint(db, universe)
     total = len(scenes)
+    consecutive_failures = 0
     for i, scene in enumerate(scenes):
         if not scene.keyframe_paths:
             continue
@@ -371,19 +423,21 @@ def run_captioning(db: Session, source: Source) -> None:
         last_exc: Exception | None = None
         for attempt in range(3):
             try:
-                result, cost = caption_scene(source, scene, transcript_text, tag_hint)
+                result, cost = caption_scene(source, scene, transcript_text, tag_hint, caption_schema)
                 scene.visual_description = result["visual_description"]
                 scene.context_description = result["context_description"]
                 scene.character_tags = result["character_tags"]
-                scene.location_tags = result["location_tags"]
-                scene.mood_action_tags = result["mood_action_tags"]
+                # the local model's schema still uses the older field names
+                scene.location_tags = result.get("place_tags", result.get("location_tags", []))
+                scene.mood_action_tags = result.get("mood_action_tags", [])
+                scene.region = result.get("region")
                 scene.caption_status = "done"
                 scene.caption_error = None
                 provider = current_caption_provider()
                 schema, instruction = (
                     (LOCAL_CAPTION_SCHEMA, LOCAL_INSTRUCTION_TEXT)
                     if provider == "local"
-                    else (CAPTION_SCHEMA, INSTRUCTION_TEXT)
+                    else (caption_schema, INSTRUCTION_TEXT)
                 )
                 scene.model_version = f"{provider}:{current_caption_model()}:{_prompt_version(schema, instruction)}"
                 if cost is not None:
@@ -396,9 +450,15 @@ def run_captioning(db: Session, source: Source) -> None:
                     time.sleep(3 * (attempt + 1))
 
         if last_exc is not None:
+            logger.warning("  [source %s] scene %s caption failed after 3 attempts: %s", source.id, scene.id, last_exc)
             scene.caption_status = "error"
             scene.caption_error = str(last_exc)
             scene.caption_attempts += 1
+            consecutive_failures += 1
+        else:
+            consecutive_failures = 0
 
         source.current_stage_detail = f"captioning {i + 1}/{total}"
         db.commit()
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            raise CaptioningUnavailable(str(last_exc))

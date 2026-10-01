@@ -218,6 +218,11 @@ function SourceRow({ source, columns }: { source: SourceOut; columns: ColumnSett
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sources"] }),
   });
 
+  const prepareMutation = useMutation({
+    mutationFn: () => api.prepareSource(source.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sources"] }),
+  });
+
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteSource(source.id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sources"] }),
@@ -394,7 +399,21 @@ function SourceRow({ source, columns }: { source: SourceOut; columns: ColumnSett
             </button>
           )}
           {columns.reindexBtn && (
-            <button className="small ghost" onClick={() => reindexMutation.mutate()}>
+            <button
+              className="small ghost"
+              title="Free, local only: transcript, shots, scenes, keyframes and the visual index. No captioning, nothing sent to Claude."
+              onClick={() => prepareMutation.mutate()}
+              disabled={prepareMutation.isPending || source.status === "paused"}
+            >
+              {source.status === "paused" ? "Preparing…" : "Prepare (free)"}
+            </button>
+          )}
+          {columns.reindexBtn && (
+            <button
+              className="small ghost"
+              title="Full index including captioning - paid, runs when the captioning worker is started"
+              onClick={() => reindexMutation.mutate()}
+            >
               Reindex
             </button>
           )}

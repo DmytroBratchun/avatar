@@ -60,6 +60,33 @@ def update_settings(
         SETTINGS_PATH.write_text(json.dumps(raw, indent=2), encoding="utf-8")
 
 
+def editor_projects_root() -> str | None:
+    """Folder holding one sub-folder per video-editor project. No default - the
+    user picks where their projects live."""
+    return _read_raw().get("editor_projects_root") or None
+
+
+def set_editor_projects_root(path: str) -> None:
+    with _lock:
+        raw = _read_raw()
+        raw["editor_projects_root"] = path
+        SETTINGS_PATH.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+
+def editor_default_look() -> dict:
+    """The look (frame, sizes, blur...) new video projects start with - whatever the
+    user last saved as default from a project's Look tab."""
+    value = _read_raw().get("editor_default_look")
+    return value if isinstance(value, dict) else {}
+
+
+def set_editor_default_look(look: dict) -> None:
+    with _lock:
+        raw = _read_raw()
+        raw["editor_default_look"] = look
+        SETTINGS_PATH.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+
 def current_caption_provider() -> str:
     raw = _read_raw()
     return raw.get("caption_provider") or settings.caption_provider

@@ -177,7 +177,7 @@ function WorkerCard({
 }: {
   title: string;
   description: string;
-  status?: { running: boolean; reason: string | null; status?: string; current_episode?: string | null };
+  status?: { running: boolean; reason: string | null; status?: string; current_episode?: string | null; detail?: string | null };
   actions?: React.ReactNode;
 }) {
   return (
@@ -193,6 +193,11 @@ function WorkerCard({
         <p style={{ margin: 0, fontSize: "0.85rem" }}>Processing: {status.current_episode}</p>
       )}
       {status?.running && status.status === "idle" && <p style={{ margin: 0, fontSize: "0.85rem" }}>Idle - queue empty</p>}
+      {status?.running && status.status === "waiting" && (
+        <p className="error-text" style={{ margin: 0 }}>
+          Paused on {status.current_episode}: {status.detail}
+        </p>
+      )}
       {!status?.running && status?.reason && <p className="error-text" style={{ marginTop: "0.3rem" }}>{status.reason}</p>}
       {actions && <div style={{ marginTop: "0.6rem" }}>{actions}</div>}
     </div>

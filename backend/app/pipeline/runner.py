@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import Scene, Source
-from app.pipeline.stages.caption import run_captioning
+from app.pipeline.stages.caption import CaptioningUnavailable, run_captioning
 from app.pipeline.stages.detect_shots import run_shot_detection
 from app.pipeline.stages.embed import run_embedding, run_text_embedding_only, run_visual_embedding_only
 from app.pipeline.stages.episode_summary import run_episode_summary
@@ -109,6 +109,13 @@ def process_source(db: Session, source: Source) -> None:
             source.status = "failed"
             source.error_message = "Some scenes failed captioning/embedding; see caption_error per scene."
         db.commit()
+    except CaptioningUnavailable:
+        # not this source's fault - leave it queued and let the worker wait and retry
+        db.rollback()
+        source.status = "pending"
+        source.current_stage_detail = None
+        db.commit()
+        raise
     except Exception as exc:
         logger.exception("Pipeline failed for source %s", source.id)
         db.rollback()

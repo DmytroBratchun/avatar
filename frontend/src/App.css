@@ -163,6 +163,105 @@ a {
   flex-shrink: 0;
 }
 
+.app-launcher {
+  position: relative;
+}
+
+.app-launcher-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  width: 260px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  z-index: 20;
+}
+
+.app-launcher-menu button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 0.5rem 0.65rem;
+  border: none;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: transparent;
+  text-align: left;
+}
+
+.app-launcher-menu button:hover,
+.app-launcher-menu button.active {
+  background: var(--bg-hover);
+}
+
+.app-launcher-menu button strong {
+  font-size: 0.875rem;
+  color: var(--text-primary);
+}
+
+.app-launcher-menu button span {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tabs button {
+  padding: 0.45rem 0.85rem;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  margin-bottom: -1px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.tabs button:hover {
+  color: var(--text-primary);
+  background: transparent;
+}
+
+.tabs button.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
+/* Look tab: settings on the left, a still preview on the right that stays in view */
+.look-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.look-preview {
+  position: sticky;
+  top: 56px;
+}
+
+@media (max-width: 900px) {
+  .look-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .look-preview {
+    position: static;
+  }
+}
+
 .topnav a {
   color: var(--text-secondary);
   text-decoration: none;

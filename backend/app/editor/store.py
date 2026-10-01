@@ -1,0 +1,332 @@
+"""On-disk state for video-editor projects.
+
+One folder per project under the user-chosen root:
+
+    <root>/<project_id>/
+        project.json      - the project state (this module's Project model)
+        transcript.json   - word-level timestamps of the narration
+        <audio file>      - the narration, copied in on upload
+
+The editor never writes to avatar.db - it only reads the index through search.
+"""
+
+import datetime as dt
+import json
+import os
+import re
+import threading
+from pathlib import Path
+
+from pydantic import BaseModel, Field
+
+from app.services.runtime_settings import editor_default_look, editor_projects_root
+from app.services.universes import Universe, all_universes, get_universe, universe_for_show
+
+SCHEMA_VERSION = 1
+PROJECT_FILE = "project.json"
+TRANSCRIPT_FILE = "transcript.json"
+
+# One writer at a time per process - API handlers and stage threads both
+# read-modify-write project.json.
+_lock = threading.RLock()
+
+
+class ProjectNotFound(Exception):
+    pass
+
+
+class RootNotConfigured(Exception):
+    pass
+
+
+class Word(BaseModel):
+    text: str
+    start: float
+    end: float
+
+
+class Segment(BaseModel):
+    """A stretch of the final video's timeline. Narration segments point into the
+    narration audio; quote segments (added later) carry their own source audio and
+    push everything after them later - so the timeline is never assumed to be the
+    audio file's own clock."""
+
+    id: str
+    type: str = "narration"  # "narration" | "quote"
+    audio_start: float
+    audio_end: float
+
+
+class Candidate(BaseModel):
+    """One piece of footage that could fill a slot. Carries the file path and
+    times itself - scene ids change when an episode is re-indexed, so scene_id is
+    only a hint for thumbnails and de-duplication."""
+
+    scene_id: int
+    source_id: int
+    file_path: str
+    show_title: str | None = None
+    book: int | None = None
+    episode_number: int | None = None
+    scene_start: float
+    scene_end: float
+    clip_start: float
+    clip_end: float
+    description: str | None = None
+    # how many standard deviations closer to the query than a random scene, per index
+    text_score: float | None = None
+    visual_score: float | None = None
+    score: float
+
+
+class Slot(BaseModel):
+    """One clip's worth of screen time inside a beat (at most MAX_CLIP_SECONDS)."""
+
+    # seconds on the narration clock
+    start: float
+    end: float
+    text_query: str = ""
+    visual_query: str = ""
+    # which shows/films to look in for this clip; empty = everything the project allows
+    shows: list[str] = Field(default_factory=list)
+    candidates: list[Candidate] = Field(default_factory=list)
+    selected: int | None = None  # index into candidates
+    locked: bool = False  # chosen by the user - automatic selection leaves it alone
+
+
+class Background(BaseModel):
+    """One calm scenery shot shown blurred behind the frame. Like Candidate, it
+    carries the file path and times rather than relying on scene_id."""
+
+    scene_id: int
+    source_id: int
+    file_path: str
+    clip_start: float
+    clip_end: float
+
+
+class Beat(BaseModel):
+    id: str
+    segment_id: str
+    # inclusive word indexes into transcript.json
+    word_start: int
+    word_end: int
+    # seconds in the narration audio
+    start: float
+    end: float
+    text: str
+    summary: str = ""
+    slots: list[Slot] = Field(default_factory=list)
+    background_query: str = ""
+    # scenery shots that play behind this beat, in order (framed layout)
+    backgrounds: list[Background] = Field(default_factory=list)
+
+
+class Quote(BaseModel):
+    """A clip of dialogue from the show, played with its own sound between two
+    pieces of narration. Only "approved" quotes are part of the video."""
+
+    id: str
+    status: str = "proposed"  # "proposed" | "approved" | "rejected"
+    # plays after this narration word, i.e. at this time on the narration clock
+    after_word: int
+    at: float
+    after_text: str = ""  # the narration just before it, for display
+    source_id: int
+    file_path: str
+    show_title: str | None = None
+    book: int | None = None
+    episode_number: int | None = None
+    clip_start: float
+    clip_end: float
+    text: str
+    speaker: str = ""
+    reason: str = ""
+
+
+class Job(BaseModel):
+    stage: str
+    status: str  # "running" | "done" | "error"
+    detail: str = ""
+    error: str | None = None
+    started_at: str = ""
+
+
+class RenderSettings(BaseModel):
+    layout: str = "framed"  # "framed" (clip in a frame over a blurred background) | "simple" (full screen)
+    search_mode: str = "smart_hybrid"  # "smart_hybrid" | "text" | "visual"
+    # framed layout only. frame: "border" (plain outline), "none", or the name of a
+    # PNG in <projects root>/_frames whose transparent opening the clip sits under
+    frame: str = "border"
+    clip_height: float = 0.75  # share of the screen height, for "border"/"none"; image frames define their own
+    blur: float = 15.0  # background blur, 0-100
+    dim: float = 0.4  # background darkening, 0-1
+    background_speed: float = 1.0  # playback speed of the background scenery, 0.25-1
+    frame_scale: float = 1.0  # size of the whole frame (artwork and clip together); 1 = as tall as the screen allows
+    clip_scale: float = 1.0  # size of the clip relative to the frame's opening, to fine-tune the fit
+    corner_radius: int = 0  # rounding of the clip's corners in output pixels, 0 = square
+    # advanced: one radius per corner (top-left, top-right, bottom-right, bottom-left);
+    # when set it replaces corner_radius
+    corner_radii: list[int] | None = None
+    wide_full_screen: bool = True  # framed layout: widescreen sources fill the screen, no frame
+
+
+class Project(BaseModel):
+    version: int = SCHEMA_VERSION
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+    audio_file: str | None = None
+    audio_duration: float | None = None
+    script_text: str | None = None
+    # the fictional world this video is about; decides which shows it can use and
+    # what the prompts say about the world. Empty on projects made before universes.
+    universe: str = ""
+    shows: list[str] = Field(default_factory=list)
+    settings: RenderSettings = Field(default_factory=RenderSettings)
+    word_count: int = 0
+    timeline: list[Segment] = Field(default_factory=list)
+    beats: list[Beat] = Field(default_factory=list)
+    quotes: list[Quote] = Field(default_factory=list)
+    llm_cost_usd: float = 0.0
+    output_file: str | None = None  # relative to the project folder
+    rendered_at: str | None = None
+    job: Job | None = None
+
+
+def now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def root_dir() -> Path:
+    root = editor_projects_root()
+    if not root:
+        raise RootNotConfigured("Editor projects folder is not set")
+    path = Path(root)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def project_dir(project_id: str) -> Path:
+    # ids are slugs we generated; refuse anything that could step outside the root
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", project_id):
+        raise ProjectNotFound(project_id)
+    path = root_dir() / project_id
+    if not (path / PROJECT_FILE).is_file():
+        raise ProjectNotFound(project_id)
+    return path
+
+
+def _write_json(path: Path, data: dict | list) -> None:
+    # write-then-rename so a crash mid-write can't leave a truncated project.json
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _slugify(title: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:60].strip("-")
+    return slug or "project"
+
+
+def default_settings(layout: str | None = None) -> RenderSettings:
+    """Settings for a new project: the saved default look, falling back to the
+    built-in defaults for anything missing or no longer valid."""
+    try:
+        settings = RenderSettings.model_validate(editor_default_look())
+    except ValueError:
+        settings = RenderSettings()
+    if layout:
+        settings.layout = layout
+    return settings
+
+
+def project_universe(project: "Project") -> Universe:
+    """The project's universe; for older projects, worked out from its shows."""
+    chosen = get_universe(project.universe)
+    if chosen is not None:
+        return chosen
+    if project.shows:
+        return universe_for_show(project.shows[0])
+    return all_universes()[0]
+
+
+def project_shows(project: "Project") -> list[str]:
+    """Shows this project may take footage from: its own choice, or the whole universe."""
+    return list(project.shows) or list(project_universe(project).shows)
+
+
+def create_project(
+    title: str, script_text: str | None, shows: list[str], layout: str | None, universe: str = ""
+) -> Project:
+    with _lock:
+        root = root_dir()
+        base = _slugify(title)
+        project_id = base
+        n = 2
+        while (root / project_id).exists():
+            project_id = f"{base}-{n}"
+            n += 1
+        (root / project_id).mkdir()
+
+        created = now()
+        project = Project(
+            id=project_id,
+            title=title,
+            created_at=created,
+            updated_at=created,
+            script_text=script_text or None,
+            universe=universe,
+            shows=shows,
+            settings=default_settings(layout),
+        )
+        _write_json(root / project_id / PROJECT_FILE, project.model_dump())
+        return project
+
+
+def load_project(project_id: str) -> Project:
+    with _lock:
+        path = project_dir(project_id) / PROJECT_FILE
+        return Project.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def save_project(project: Project) -> None:
+    with _lock:
+        project.updated_at = now()
+        _write_json(project_dir(project.id) / PROJECT_FILE, project.model_dump())
+
+
+def update_project(project_id: str, mutate) -> Project:
+    """Load, apply mutate(project), save - under the lock, so a stage thread
+    reporting progress and an API edit can't overwrite each other's fields."""
+    with _lock:
+        project = load_project(project_id)
+        mutate(project)
+        save_project(project)
+        return project
+
+
+def list_projects() -> list[Project]:
+    root = root_dir()
+    projects = []
+    for path in sorted(root.iterdir()):
+        if (path / PROJECT_FILE).is_file():
+            try:
+                projects.append(Project.model_validate_json((path / PROJECT_FILE).read_text(encoding="utf-8")))
+            except ValueError:
+                continue
+    projects.sort(key=lambda p: p.created_at, reverse=True)
+    return projects
+
+
+def load_words(project_id: str) -> list[Word]:
+    path = project_dir(project_id) / TRANSCRIPT_FILE
+    if not path.is_file():
+        return []
+    return [Word.model_validate(w) for w in json.loads(path.read_text(encoding="utf-8"))]
+
+
+def save_words(project_id: str, words: list[Word]) -> None:
+    with _lock:
+        _write_json(project_dir(project_id) / TRANSCRIPT_FILE, [w.model_dump() for w in words])

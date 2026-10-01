@@ -88,6 +88,7 @@ export interface WorkerStatusOut {
   current_source_id?: number | null;
   current_episode?: string | null;
   last_seen?: string | null;
+  detail?: string | null;
 }
 
 export interface SettingsOut {
@@ -111,6 +112,7 @@ export interface SceneOut {
   visual_description: string | null;
   context_description: string | null;
   character_tags: string[];
+  region?: string | null;
   location_tags: string[];
   mood_action_tags: string[];
   caption_status: string;
@@ -160,6 +162,142 @@ export interface TranscriptChunkContextOut {
   chunk: TranscriptChunkOut;
   episode_summary: string | null;
   overlapping_scenes: SceneOut[];
+}
+
+export interface UniverseOut {
+  id: string;
+  name: string;
+  description?: string;
+  shows: string[];
+  regions: string[];
+  // the universe's shows that are actually in the library
+  available_shows: string[];
+}
+
+export interface EditorWord {
+  text: string;
+  start: number;
+  end: number;
+}
+
+export interface EditorSegment {
+  id: string;
+  type: string;
+  audio_start: number;
+  audio_end: number;
+}
+
+export interface EditorCandidate {
+  scene_id: number;
+  source_id: number;
+  file_path: string;
+  show_title: string | null;
+  book: number | null;
+  episode_number: number | null;
+  scene_start: number;
+  scene_end: number;
+  clip_start: number;
+  clip_end: number;
+  description: string | null;
+  text_score: number | null;
+  visual_score: number | null;
+  score: number;
+}
+
+export interface EditorSlot {
+  start: number;
+  end: number;
+  text_query: string;
+  visual_query: string;
+  shows: string[];
+  candidates: EditorCandidate[];
+  selected: number | null;
+  locked: boolean;
+}
+
+export interface EditorBackground {
+  scene_id: number;
+  source_id: number;
+  file_path: string;
+  clip_start: number;
+  clip_end: number;
+}
+
+export interface EditorBeat {
+  slots: EditorSlot[];
+  background_query: string;
+  backgrounds: EditorBackground[];
+  id: string;
+  segment_id: string;
+  word_start: number;
+  word_end: number;
+  start: number;
+  end: number;
+  text: string;
+  summary: string;
+}
+
+export interface EditorQuote {
+  id: string;
+  status: "proposed" | "approved" | "rejected";
+  after_word: number;
+  at: number;
+  after_text: string;
+  source_id: number;
+  file_path: string;
+  show_title: string | null;
+  book: number | null;
+  episode_number: number | null;
+  clip_start: number;
+  clip_end: number;
+  text: string;
+  speaker: string;
+  reason: string;
+}
+
+export type EditorStage = "transcribe" | "quotes" | "beats" | "queries" | "select" | "background" | "render";
+
+export interface EditorJob {
+  stage: string;
+  status: "running" | "done" | "error";
+  detail: string;
+  error: string | null;
+  started_at: string;
+}
+
+export interface EditorProject {
+  version: number;
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  universe: string;
+  audio_file: string | null;
+  audio_duration: number | null;
+  script_text: string | null;
+  shows: string[];
+  settings: {
+    layout: "framed" | "simple";
+    search_mode: "smart_hybrid" | "text" | "visual";
+    frame: string;
+    clip_height: number;
+    blur: number;
+    dim: number;
+    frame_scale: number;
+    clip_scale: number;
+    corner_radius: number;
+    corner_radii: number[] | null;
+    wide_full_screen: boolean;
+    background_speed: number;
+  };
+  word_count: number;
+  timeline: EditorSegment[];
+  beats: EditorBeat[];
+  quotes: EditorQuote[];
+  llm_cost_usd: number;
+  output_file: string | null;
+  rendered_at: string | null;
+  job: EditorJob | null;
 }
 
 type QueryValue = string | number | string[] | undefined;
@@ -219,6 +357,7 @@ export const api = {
   ) => request<SourceOut>(`/api/sources/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   reindexSource: (id: number) => request<SourceOut>(`/api/sources/${id}/reindex`, { method: "POST" }),
   dequeueSource: (id: number) => request<SourceOut>(`/api/sources/${id}/dequeue`, { method: "POST" }),
+  prepareSource: (id: number) => request<SourceOut>(`/api/sources/${id}/prepare`, { method: "POST" }),
   reindexVisual: (id: number) => request<SourceOut>(`/api/sources/${id}/reindex-visual`, { method: "POST" }),
   reindexText: (id: number) => request<SourceOut>(`/api/sources/${id}/reindex-text`, { method: "POST" }),
   cancelVisualReindex: (id: number) => request<SourceOut>(`/api/sources/${id}/cancel-visual-reindex`, { method: "POST" }),
@@ -257,6 +396,83 @@ export const api = {
   getChunkContext: (chunkId: number) => request<TranscriptChunkContextOut>(`/api/transcript-chunks/${chunkId}/context`),
   listTranscriptChunks: (sourceId: number) =>
     request<TranscriptChunkOut[]>(`/api/transcript-chunks${buildQuery({ source_id: sourceId })}`),
+
+  listLogs: () =>
+    request<{ name: string; label: string; exists: boolean; size: number; modified: number | null; active: boolean }[]>("/api/logs"),
+  tailLog: (name: string, lines: number) =>
+    request<{ name: string; lines: string[]; size: number }>(`/api/logs/${name}${buildQuery({ lines })}`),
+
+  getEditorSettings: () => request<{ projects_root: string | null }>("/api/editor/settings"),
+  setEditorProjectsRoot: (projects_root: string) =>
+    request<{ projects_root: string | null }>("/api/editor/settings", {
+      method: "PUT",
+      body: JSON.stringify({ projects_root }),
+    }),
+  listEditorProjects: () => request<EditorProject[]>("/api/editor/projects"),
+  getEditorProject: (id: string) => request<EditorProject>(`/api/editor/projects/${id}`),
+  getEditorDefaultLook: () => request<EditorProject["settings"]>("/api/editor/default-look"),
+  saveEditorDefaultLook: (id: string) =>
+    request<EditorProject["settings"]>(`/api/editor/projects/${id}/save-default-look`, { method: "POST" }),
+  listUniverses: () => request<UniverseOut[]>("/api/universes"),
+  createEditorProject: (payload: { title: string; universe: string; script_text?: string; shows: string[]; layout?: string }) =>
+    request<EditorProject>("/api/editor/projects", { method: "POST", body: JSON.stringify(payload) }),
+  updateEditorProject: (
+    id: string,
+    payload: {
+      title?: string;
+      script_text?: string;
+      shows?: string[];
+      layout?: string;
+      search_mode?: string;
+      frame?: string;
+      blur?: number;
+      dim?: number;
+      frame_scale?: number;
+      clip_scale?: number;
+      corner_radius?: number;
+      corner_radii?: number[] | null;
+      background_speed?: number;
+      wide_full_screen?: boolean;
+    }
+  ) => request<EditorProject>(`/api/editor/projects/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  // raw body upload - the backend has no multipart parser
+  uploadEditorAudio: (id: string, file: File) =>
+    request<EditorProject>(`/api/editor/projects/${id}/audio${buildQuery({ filename: file.name })}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,
+    }),
+  runEditorStage: (id: string, stage: EditorStage) =>
+    request<EditorProject>(`/api/editor/projects/${id}/run/${stage}`, { method: "POST" }),
+  updateEditorSlot: (id: string, beatId: string, slotIndex: number, payload: { selected?: number; locked?: boolean }) =>
+    request<EditorProject>(`/api/editor/projects/${id}/beats/${beatId}/slots/${slotIndex}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  searchEditorSlot: (id: string, beatId: string, slotIndex: number, payload: { text_query: string; visual_query: string; shows?: string[] }) =>
+    request<EditorProject>(`/api/editor/projects/${id}/beats/${beatId}/slots/${slotIndex}/search`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateEditorQuote: (id: string, quoteId: string, payload: { status?: string; after_word?: number }) =>
+    request<EditorProject>(`/api/editor/projects/${id}/quotes/${quoteId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  listEditorFrames: () => request<string[]>("/api/editor/frames"),
+  uploadEditorFrame: (file: File) =>
+    request<string[]>(`/api/editor/frames${buildQuery({ filename: file.name })}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,
+    }),
+  // rendered_at in the URL so the browser drops its cached copy after a re-render
+  editorOutputUrl: (id: string, renderedAt: string | null) =>
+    `${BASE_URL}/api/editor/projects/${id}/output${buildQuery({ v: renderedAt ?? undefined })}`,
+  // `version` changes whenever the look or the clip changes, so the browser asks for a fresh still
+  editorPreviewUrl: (id: string, slot: number, version: string) =>
+    `${BASE_URL}/api/editor/projects/${id}/preview${buildQuery({ slot, v: version })}`,
+  editorAudioUrl: (id: string) => `${BASE_URL}/api/editor/projects/${id}/audio`,
 
   streamUrl: (sourceId: number) => `${BASE_URL}/api/media/${sourceId}/stream`,
   keyframeUrl: (sceneId: number, index: number) => `${BASE_URL}/api/media/scenes/${sceneId}/keyframes/${index}`,

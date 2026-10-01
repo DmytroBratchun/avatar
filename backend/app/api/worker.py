@@ -23,6 +23,9 @@ def _read_heartbeat(path: Path) -> dict:
     except (json.JSONDecodeError, OSError):
         return {"running": False, "reason": "heartbeat file unreadable"}
 
+    if payload.get("status") == "stopped":
+        return {"running": False, "reason": "stopped", "last_seen": payload.get("last_seen")}
+
     last_seen = dt.datetime.fromisoformat(payload["last_seen"])
     age_seconds = (dt.datetime.now(dt.timezone.utc) - last_seen).total_seconds()
     alive = age_seconds < STALE_AFTER_SECONDS
@@ -33,6 +36,7 @@ def _read_heartbeat(path: Path) -> dict:
         "status": payload.get("status"),
         "current_source_id": payload.get("current_source_id"),
         "current_episode": payload.get("current_episode"),
+        "detail": payload.get("detail"),
         "last_seen": payload.get("last_seen"),
     }
 
@@ -56,25 +60,28 @@ def _pid_is_alive(pid: int) -> bool:
     return str(pid) in result.stdout
 
 
-def _find_worker_pid_by_command_line() -> int | None:
-    """Falls back to searching for the worker process directly when worker.pid is
-    missing/stale (e.g. it was started outside /start, or the pidfile was lost) -
-    without this, Stop 404s even though a real worker process is running."""
+def _find_worker_pids() -> list[int]:
+    """Every process running the captioning worker, found by command line. The venv's
+    python.exe is a launcher that starts the real interpreter (python3.x.exe) as a
+    child, so there are normally two, and the pid file only knows the launcher."""
     result = subprocess.run(
         [
             "powershell", "-NoProfile", "-Command",
-            "Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" "
-            "| Where-Object { $_.CommandLine -like '*app.pipeline.worker*' } "
+            "Get-CimInstance Win32_Process "
+            "| Where-Object { $_.Name -like 'python*' -and $_.CommandLine -like '*app.pipeline.worker*' } "
             "| Select-Object -ExpandProperty ProcessId",
         ],
         capture_output=True,
         text=True,
     )
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if line.isdigit():
-            return int(line)
-    return None
+    return [int(line) for line in result.stdout.split() if line.strip().isdigit()]
+
+
+def _mark_stopped() -> None:
+    """A killed worker can't update its own heartbeat, and the old one keeps looking
+    alive for another 30s - so say it was stopped."""
+    payload = {"status": "stopped", "last_seen": dt.datetime.now(dt.timezone.utc).isoformat()}
+    (DATA_DIR / "worker_heartbeat.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
 @router.post("/start")
@@ -88,9 +95,9 @@ def start_worker() -> dict:
         if _pid_is_alive(pid):
             raise HTTPException(409, "Captioning worker is already running")
 
-    existing_pid = _find_worker_pid_by_command_line()
-    if existing_pid is not None:
-        WORKER_PID_FILE.write_text(str(existing_pid), encoding="utf-8")
+    existing = _find_worker_pids()
+    if existing:
+        WORKER_PID_FILE.write_text(str(existing[0]), encoding="utf-8")
         raise HTTPException(409, "Captioning worker is already running")
 
     process = subprocess.Popen(
@@ -104,22 +111,22 @@ def start_worker() -> dict:
 
 @router.post("/stop")
 def stop_worker() -> dict:
-    """Force-kills the paid captioning worker. A scene mid-caption-call when this
-    hits just doesn't get committed - it stays caption_status='pending'/'error'
-    and picks back up cleanly next run, nothing corrupts."""
-    pid: int | None = None
+    """Force-kills the paid captioning worker and anything it started. A scene
+    mid-caption-call when this hits just doesn't get committed - it stays
+    caption_status='pending'/'error' and picks back up cleanly next run, nothing
+    corrupts. Safe to call when nothing is running."""
+    pids = set(_find_worker_pids())
     if WORKER_PID_FILE.exists():
-        pid = int(WORKER_PID_FILE.read_text(encoding="utf-8").strip())
-        if not _pid_is_alive(pid):
-            pid = None
+        try:
+            pid = int(WORKER_PID_FILE.read_text(encoding="utf-8").strip())
+            if _pid_is_alive(pid):
+                pids.add(pid)
+        except ValueError:
+            pass
 
-    if pid is None:
-        pid = _find_worker_pid_by_command_line()
-
-    if pid is None:
-        WORKER_PID_FILE.unlink(missing_ok=True)
-        raise HTTPException(404, "No captioning worker process found")
-
-    subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+    for pid in pids:
+        # /T: the whole tree - the real interpreter and any claude call in flight
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
     WORKER_PID_FILE.unlink(missing_ok=True)
-    return {"stopped": True}
+    _mark_stopped()
+    return {"stopped": True, "was_running": bool(pids)}
