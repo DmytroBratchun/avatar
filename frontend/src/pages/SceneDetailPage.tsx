@@ -119,6 +119,16 @@ export default function SceneDetailPage() {
             ) : null}
           </div>
 
+          {scene.wiki_description && (
+            <div className="card" style={{ marginTop: "0.75rem", maxHeight: "260px", overflowY: "auto" }}>
+              <h3>From the fan wiki</h3>
+              <p className="hint" style={{ marginTop: 0 }}>
+                What the wiki's transcript says happens and is said around this scene. Searched as a free text index.
+              </p>
+              <p style={{ margin: 0, whiteSpace: "pre-line", fontSize: "0.85rem" }}>{scene.wiki_description}</p>
+            </div>
+          )}
+
           <div className="card" style={{ marginTop: "0.75rem", maxHeight: "360px", overflowY: "auto" }}>
             <h3>Transcript</h3>
             {scene.transcript_lines.length === 0 && <p style={{ margin: 0 }}>No dialogue in this scene.</p>}

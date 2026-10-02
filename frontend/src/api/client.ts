@@ -113,6 +113,7 @@ export interface SceneOut {
   context_description: string | null;
   character_tags: string[];
   region?: string | null;
+  wiki_description?: string | null;
   location_tags: string[];
   mood_action_tags: string[];
   caption_status: string;
@@ -214,6 +215,7 @@ export interface EditorCandidate {
   clip_end: number;
   description: string | null;
   text_score: number | null;
+  wiki_score?: number | null;
   visual_score: number | null;
   score: number;
   slivers?: number;

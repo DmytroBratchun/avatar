@@ -20,7 +20,7 @@ export default function SceneCard({ scene }: { scene: SceneOut }) {
         <div className="scene-meta">
           Book {scene.book} · Ep {scene.episode_number} · {formatTime(scene.start_time)}–{formatTime(scene.end_time)} · {(scene.end_time - scene.start_time).toFixed(1)}s
         </div>
-        <p>{scene.context_description ?? scene.visual_description ?? "(not captioned yet)"}</p>
+        <p>{scene.context_description ?? scene.visual_description ?? scene.wiki_description ?? "(no description yet)"}</p>
         <div>
           {shownTags.map((tag) => (
             <span className="tag" key={tag}>

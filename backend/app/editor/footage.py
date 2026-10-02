@@ -18,7 +18,7 @@ from app.db.models import Scene, Shot, Source
 from app.editor.store import Candidate, Project, Slot, project_shows
 from app.pipeline.stages.extract_keyframes import _OFFSETS_BY_COUNT
 from app.services.embeddings import embed_text, embed_text_for_visual_search
-from app.vectorstore.sqlite_vec_client import _serialize, knn_text, knn_visual
+from app.vectorstore.sqlite_vec_client import _serialize, knn_text, knn_visual, knn_wiki
 
 # A piece of a shot shorter than this inside a clip reads as a flicker, not as a shot.
 MIN_FRAGMENT_SECONDS = 0.8
@@ -56,6 +56,7 @@ class SearchContext:
 
         rng = random.Random(0)
         self.text_sample = self._sample(rng, Scene.text_embedding_model)
+        self.wiki_sample = self._sample(rng, Scene.wiki_description)
         self.visual_sample = self._sample(rng, Scene.visual_embedding_model)
 
     def candidates_for(self, shows: list[str]) -> list[int] | None:
@@ -219,22 +220,31 @@ def search_slot(ctx: SearchContext, slot: Slot) -> list[Candidate]:
     """Ranked candidates for one slot, best first (no reuse handling here)."""
     db = ctx.db
     text_scores: dict[int, float] = {}
+    wiki_scores: dict[int, float] = {}
     visual_scores: dict[int, float] = {}
     candidate_ids = ctx.candidates_for(slot.shows)
 
     if ctx.mode in ("smart_hybrid", "text") and slot.text_query.strip():
+        # the narrative query is searched in both text indexes: paid captions (few
+        # episodes) and the fan-wiki descriptions (nearly all of them, free)
         vector = embed_text(slot.text_query)
         hits = knn_text(db, vector, candidate_ids, k=KNN_K)
         text_scores = _scored(hits, _background(db, "scene_text_vec", ctx.text_sample, vector))
+        hits = knn_wiki(db, vector, candidate_ids, k=KNN_K)
+        wiki_scores = _scored(hits, _background(db, "scene_wiki_vec", ctx.wiki_sample, vector))
     if ctx.mode in ("smart_hybrid", "visual") and slot.visual_query.strip():
         vector = embed_text_for_visual_search(slot.visual_query)
         hits = knn_visual(db, vector, candidate_ids, k=KNN_K)
         visual_scores = _scored(hits, _background(db, "scene_visual_vec", ctx.visual_sample, vector))
 
     combined: dict[int, float] = {}
-    for scene_id in text_scores.keys() | visual_scores.keys():
-        scores = [s for s in (text_scores.get(scene_id), visual_scores.get(scene_id)) if s is not None]
-        combined[scene_id] = max(scores) + (AGREEMENT_BONUS * min(scores) if len(scores) == 2 else 0.0)
+    for scene_id in text_scores.keys() | wiki_scores.keys() | visual_scores.keys():
+        scores = sorted(
+            (s for s in (text_scores.get(scene_id), wiki_scores.get(scene_id), visual_scores.get(scene_id)) if s is not None),
+            reverse=True,
+        )
+        # the strongest signal decides; a second one agreeing adds a little
+        combined[scene_id] = scores[0] + (AGREEMENT_BONUS * scores[1] if len(scores) > 1 else 0.0)
 
     ranked = sorted(combined, key=combined.get, reverse=True)[: CANDIDATES_PER_SLOT * 3]
     if not ranked:
@@ -250,9 +260,11 @@ def search_slot(ctx: SearchContext, slot: Slot) -> list[Candidate]:
             continue
         scene, source = by_id[scene_id]
         text_score = text_scores.get(scene_id)
+        wiki_score = wiki_scores.get(scene_id)
         visual_score = visual_scores.get(scene_id)
-        # cut around the keyframe unless the caption was the stronger reason for the match
-        on_keyframe = visual_score is not None and (text_score is None or visual_score >= text_score)
+        # cut around the keyframe unless a text index was the stronger reason for the match
+        best_text = max((s for s in (text_score, wiki_score) if s is not None), default=None)
+        on_keyframe = visual_score is not None and (best_text is None or visual_score >= best_text)
         clip_start, clip_end = _clip_window(db, scene, source, duration, on_keyframe)
         candidates.append(
             Candidate(
@@ -267,8 +279,9 @@ def search_slot(ctx: SearchContext, slot: Slot) -> list[Candidate]:
                 clip_start=clip_start,
                 clip_end=clip_end,
                 slivers=count_slivers(db, source.id, clip_start, clip_end),
-                description=scene.context_description,
+                description=scene.context_description or scene.wiki_description,
                 text_score=round(text_score, 2) if text_score is not None else None,
+                wiki_score=round(wiki_score, 2) if wiki_score is not None else None,
                 visual_score=round(visual_score, 2) if visual_score is not None else None,
                 score=round(combined[scene_id], 2),
             )

@@ -101,6 +101,9 @@ class Scene(Base):
     keyframe_paths: Mapped[list] = mapped_column(JSON, default=list)
     visual_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     context_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # what the fan-wiki transcript says happens (and is said) during this scene -
+    # a free counterpart to the paid caption, searched through scene_wiki_vec
+    wiki_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     character_tags: Mapped[list] = mapped_column(JSON, default=list)
     # which part of the universe's world this is - one of the universe's regions
     region: Mapped[str | None] = mapped_column(String, nullable=True)

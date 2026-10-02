@@ -75,6 +75,7 @@ class Candidate(BaseModel):
     description: str | None = None
     # how many standard deviations closer to the query than a random scene, per index
     text_score: float | None = None
+    wiki_score: float | None = None
     visual_score: float | None = None
     score: float
     # pieces of a shot too short to read (a flicker) that the clip would contain

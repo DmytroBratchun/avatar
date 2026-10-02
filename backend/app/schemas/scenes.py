@@ -28,6 +28,7 @@ class SceneOut(BaseModel):
     context_description: str | None
     character_tags: list[str]
     region: str | None = None
+    wiki_description: str | None = None
     location_tags: list[str]
     mood_action_tags: list[str]
     caption_status: str

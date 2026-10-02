@@ -8,7 +8,7 @@ from app.db.session import get_db
 from app.schemas.scenes import SceneOut, SearchResult
 from app.services.embeddings import embed_text, embed_text_for_visual_search
 from app.services.rank_fusion import reciprocal_rank_fusion
-from app.vectorstore.sqlite_vec_client import knn_text, knn_visual
+from app.vectorstore.sqlite_vec_client import knn_text, knn_visual, knn_wiki
 
 router = APIRouter(prefix="/api/search", tags=["search"])
 
@@ -51,6 +51,8 @@ def search_scenes(
     if mode in ("hybrid", "text"):
         text_vector = embed_text(q)
         rankings.append(knn_text(db, text_vector, candidate_ids, k=limit * 3))
+        # the free fan-wiki descriptions cover episodes that have no caption yet
+        rankings.append(knn_wiki(db, text_vector, candidate_ids, k=limit * 3))
     if mode in ("hybrid", "visual"):
         visual_vector = embed_text_for_visual_search(q)
         rankings.append(knn_visual(db, visual_vector, candidate_ids, k=limit * 3))

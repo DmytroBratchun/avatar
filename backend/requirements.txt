@@ -12,3 +12,6 @@ faster-whisper>=1.0
 scenedetect[opencv]>=0.6.4
 anthropic>=0.39
 httpx>=0.27
+
+# torch and torchvision must be the CUDA builds, or embeddings run on the CPU (~100x slower):
+#   pip install torch==2.14.0+cu130 torchvision==0.29.0+cu130 --index-url https://download.pytorch.org/whl/cu130

@@ -64,7 +64,9 @@ def embed_text_for_visual_search(text: str) -> list[float]:
     model, processor, device = _visual_model()
     # SigLIP was trained with fixed-length padding for text - unlike CLIP, using
     # variable-length padding here silently degrades text-embedding quality.
-    inputs = processor(text=[text], padding="max_length", return_tensors="pt").to(device)
+    # The text tower takes 64 tokens at most; a longer description would raise, so the
+    # tail is cut off - the start of a description is what says what the picture shows.
+    inputs = processor(text=[text], padding="max_length", truncation=True, max_length=64, return_tensors="pt").to(device)
     with torch.no_grad():
         output = model.get_text_features(**inputs)
         features = output.pooler_output if hasattr(output, "pooler_output") else output

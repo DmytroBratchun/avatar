@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Personal, local-only tool that indexes TV episodes (Avatar: The Last Airbender) into searchable scenes, so footage can be found by meaning for video editing / scriptwriting. FastAPI + SQLite backend in `backend/`, React + Vite frontend in `frontend/`. Windows machine with a CUDA GPU; `ffmpeg` and (for the default caption provider) the `claude` CLI must be on PATH.
+Personal, local-only tool that indexes TV episodes (Avatar: The Last Airbender) into searchable scenes, so footage can be found by meaning for video editing / scriptwriting. FastAPI + SQLite backend in `backend/`, React + Vite frontend in `frontend/`. Windows machine with a CUDA GPU (PyTorch must be the CUDA build - `torch==2.14.0+cu130` from the cu130 index - or every embedding silently runs on the CPU, ~100x slower); `ffmpeg` and (for the default caption provider) the `claude` CLI must be on PATH.
 
 `TODO.md` holds the backlog and known data-quality issues; `ideas.md` (Russian) describes the larger planned workflow this feeds into (voice-over, automatic video assembly). `README.md` is partly outdated - prefer the commands below.
 
@@ -71,7 +71,9 @@ A universe (`services/universes.py`) is a group of shows and films set in the sa
 
 ### Fan-wiki transcripts
 
-A universe can name a fan wiki (`transcripts_wiki`, a MediaWiki API URL) whose "Transcript" namespace holds an episode transcript per page: spoken lines with speaker names, and written descriptions of what happens on screen between them. They have no timings. `services/wiki_transcripts.py` downloads them (cached in `backend/data/wiki_transcripts/`), finds each episode's page by rare-word overlap with our Whisper transcript (no titles needed), and aligns the two word by word with difflib: a wiki line gets the time of the Whisper words it matched, a Whisper line gets the speaker its words belong to, and a description gets the gap between the lines around it. `scripts/import_wiki_transcripts.py` applies this: fills `TranscriptLine.speaker`, removes runs of 3+ Whisper lines that share no word with the page (invented over music; runs containing lines spoken elsewhere in the show, like the opening narration, are spared), and stores every wiki line and description with its matched time range in `wiki_entries`. Speakers are passed to the caption and quote prompts. The descriptions are stored but not yet used for search.
+A universe can name a fan wiki (`transcripts_wiki`, a MediaWiki API URL) whose "Transcript" namespace holds an episode transcript per page: spoken lines with speaker names, and written descriptions of what happens on screen between them. They have no timings. `services/wiki_transcripts.py` downloads them (cached in `backend/data/wiki_transcripts/`), finds each episode's page by rare-word overlap with our Whisper transcript (no titles needed), and aligns the two word by word with difflib: a wiki line gets the time of the Whisper words it matched, a Whisper line gets the speaker its words belong to, and a description gets the gap between the lines around it. `scripts/import_wiki_transcripts.py` applies this: fills `TranscriptLine.speaker`, removes runs of 3+ Whisper lines that share no word with the page (invented over music; runs containing lines spoken elsewhere in the show, like the opening narration, are spared), and stores every wiki line and description with its matched time range in `wiki_entries`. Speakers are passed to the caption and quote prompts.
+
+`services/wiki_descriptions.py` turns those entries into a text per scene (`Scene.wiki_description`): the descriptions whose time range overlaps the scene, plus the wiki's lines spoken in it. Descriptions that share one gap between two lines are spread over it in page order, in proportion to their length. `scripts/index_wiki_descriptions.py` embeds these into `scene_wiki_vec` (same text model as captions). This is a free text index covering ~85% of scenes of every episode with a wiki page, next to the paid caption index that covers only captioned episodes; both are searched by `/api/search` (text/hybrid) and by the editor's footage search, where a candidate carries `text_score`, `wiki_score` and `visual_score`. `scripts/compare_wiki_index.py` measures it against the other indexes.
 
 ### Captioning providers
 
@@ -91,6 +93,7 @@ Everything is one SQLite file, `backend/data/avatar.db` (git-ignored, along with
 
 - `scene_text_vec` FLOAT[1024] - `Scene.context_description` embedded with Qwen3-Embedding-0.6B
 - `scene_visual_vec` FLOAT[1152] - first keyframe embedded with SigLIP2
+- `scene_wiki_vec` FLOAT[1024] - `Scene.wiki_description` (fan-wiki account of the scene), same text model
 - `transcript_chunk_vec` FLOAT[1024] - `episode_summary + chunk text`
 
 The dimensions are hard-coded to those models; changing `text_embedding_model` / `visual_embedding_model` means recreating the vec tables and re-embedding. Some comments and docstrings still say "BGE" / "CLIP" from earlier models.

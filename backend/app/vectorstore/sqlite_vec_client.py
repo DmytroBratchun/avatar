@@ -24,6 +24,18 @@ def upsert_visual_vector(db: Session, scene_id: int, vector: list[float]) -> Non
     )
 
 
+def upsert_wiki_vector(db: Session, scene_id: int, vector: list[float]) -> None:
+    db.execute(text("DELETE FROM scene_wiki_vec WHERE scene_id = :id"), {"id": scene_id})
+    db.execute(
+        text("INSERT INTO scene_wiki_vec(scene_id, embedding) VALUES (:id, :vec)"),
+        {"id": scene_id, "vec": _serialize(vector)},
+    )
+
+
+def knn_wiki(db: Session, query_vector: list[float], candidate_ids: list[int] | None, k: int) -> list[tuple[int, float]]:
+    return _knn(db, "scene_wiki_vec", "scene_id", query_vector, candidate_ids, k)
+
+
 def knn_text(db: Session, query_vector: list[float], candidate_ids: list[int] | None, k: int) -> list[tuple[int, float]]:
     return _knn(db, "scene_text_vec", "scene_id", query_vector, candidate_ids, k)
 

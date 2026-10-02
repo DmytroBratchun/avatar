@@ -13,6 +13,7 @@ function episodeLabel(c: EditorCandidate): string {
 function matchLabel(c: EditorCandidate): string {
   const parts = [];
   if (c.text_score != null) parts.push(`text ${c.text_score.toFixed(1)}`);
+  if (c.wiki_score != null) parts.push(`wiki ${c.wiki_score.toFixed(1)}`);
   if (c.visual_score != null) parts.push(`visual ${c.visual_score.toFixed(1)}`);
   if (c.slivers) parts.push(`${c.slivers} flicker${c.slivers > 1 ? "s" : ""}`);
   return parts.join(" · ");
