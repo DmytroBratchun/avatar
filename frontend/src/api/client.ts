@@ -216,6 +216,7 @@ export interface EditorCandidate {
   text_score: number | null;
   visual_score: number | null;
   score: number;
+  slivers?: number;
 }
 
 export interface EditorSlot {
@@ -269,6 +270,9 @@ export interface EditorQuote {
   reason: string;
 }
 
+// the three kinds of footage the Look tab styles separately
+export type LookFormat = "4:3" | "16:9" | "wide";
+
 export type EditorStage = "transcribe" | "quotes" | "beats" | "queries" | "select" | "background" | "render";
 
 export interface EditorJob {
@@ -294,6 +298,7 @@ export interface EditorProject {
   settings: {
     layout: "framed" | "simple";
     search_mode: "smart_hybrid" | "text" | "visual";
+    max_clip_seconds: number;
     frame: string;
     clip_height: number;
     blur: number;
@@ -303,6 +308,7 @@ export interface EditorProject {
     corner_radius: number;
     corner_radii: number[] | null;
     wide_full_screen: boolean;
+    wide_fill: number;
     background_speed: number;
   };
   word_count: number;
@@ -440,6 +446,7 @@ export const api = {
       shows?: string[];
       layout?: string;
       search_mode?: string;
+      max_clip_seconds?: number;
       frame?: string;
       blur?: number;
       dim?: number;
@@ -449,6 +456,7 @@ export const api = {
       corner_radii?: number[] | null;
       background_speed?: number;
       wide_full_screen?: boolean;
+      wide_fill?: number;
     }
   ) => request<EditorProject>(`/api/editor/projects/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   // raw body upload - the backend has no multipart parser
@@ -460,6 +468,7 @@ export const api = {
     }),
   runEditorStage: (id: string, stage: EditorStage) =>
     request<EditorProject>(`/api/editor/projects/${id}/run/${stage}`, { method: "POST" }),
+  getEditorTranscript: (id: string) => request<EditorWord[]>(`/api/editor/projects/${id}/transcript`),
   unqueueEditorStage: (id: string, stage: EditorStage) =>
     request<EditorProject>(`/api/editor/projects/${id}/queue/${stage}`, { method: "DELETE" }),
   updateEditorSlot: (id: string, beatId: string, slotIndex: number, payload: { selected?: number; locked?: boolean }) =>
@@ -472,7 +481,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  updateEditorQuote: (id: string, quoteId: string, payload: { status?: string; after_word?: number }) =>
+  setEditorSlotManually: (id: string, beatId: string, slotIndex: number, payload: { scene_id?: number; source_id?: number; start?: number }) =>
+    request<EditorProject>(`/api/editor/projects/${id}/beats/${beatId}/slots/${slotIndex}/manual`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  addEditorQuote: (id: string, payload: { source_id: number; clip_start: number; clip_end: number; after_word?: number }) =>
+    request<EditorProject>(`/api/editor/projects/${id}/quotes`, { method: "POST", body: JSON.stringify(payload) }),
+  deleteEditorQuote: (id: string, quoteId: string) =>
+    request<EditorProject>(`/api/editor/projects/${id}/quotes/${quoteId}`, { method: "DELETE" }),
+  updateEditorQuote: (
+    id: string,
+    quoteId: string,
+    payload: { status?: string; after_word?: number; clip_start?: number; clip_end?: number }
+  ) =>
     request<EditorProject>(`/api/editor/projects/${id}/quotes/${quoteId}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
@@ -488,8 +510,12 @@ export const api = {
   editorOutputUrl: (id: string, renderedAt: string | null) =>
     `${BASE_URL}/api/editor/projects/${id}/output${buildQuery({ v: renderedAt ?? undefined })}`,
   // `version` changes whenever the look or the clip changes, so the browser asks for a fresh still
-  editorPreviewUrl: (id: string, slot: number, version: string) =>
-    `${BASE_URL}/api/editor/projects/${id}/preview${buildQuery({ slot, v: version })}`,
+  editorPreviewUrl: (id: string, slot: number, format: LookFormat, version: string) =>
+    `${BASE_URL}/api/editor/projects/${id}/preview${buildQuery({ slot, format, v: version })}`,
+  getEditorPreviewInfo: (id: string) =>
+    request<Record<LookFormat, { source: "project" | "library" | "placeholder"; count: number }>>(
+      `/api/editor/projects/${id}/preview-info`
+    ),
   editorAudioUrl: (id: string) => `${BASE_URL}/api/editor/projects/${id}/audio`,
 
   streamUrl: (sourceId: number) => `${BASE_URL}/api/media/${sourceId}/stream`,

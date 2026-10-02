@@ -46,6 +46,9 @@ class Source(Base):
     episode_summary_model: Mapped[str | None] = mapped_column(String, nullable=True)
     transcript_chunk_reindex_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
+    # title of the fan-wiki transcript page this episode was matched to, if any
+    wiki_page: Mapped[str | None] = mapped_column(String, nullable=True)
+
     added_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     indexed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -146,6 +149,25 @@ class TranscriptChunk(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     source: Mapped[Source] = relationship(back_populates="transcript_chunks")
+
+
+class WikiEntry(Base):
+    """One row of an episode's fan-wiki transcript, in page order: a spoken line
+    (with its speaker and exact wording) or a description of what happens on screen.
+    The wiki has no timings; start/end are where the entry was matched in our own
+    transcript - for a description, the gap between the lines around it - and are
+    empty when it couldn't be placed."""
+
+    __tablename__ = "wiki_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"), index=True)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String, nullable=False)  # "line" | "desc"
+    speaker: Mapped[str | None] = mapped_column(String, nullable=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    start_time: Mapped[float | None] = mapped_column(Float, nullable=True)
+    end_time: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class SceneShot(Base):

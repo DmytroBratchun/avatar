@@ -121,6 +121,19 @@ def _detect_window(alpha: Image.Image) -> tuple[int, int, int, int]:
     right = sorted(walk(cx, y, 1, 0) for y in rows)[-9]
     top = sorted(walk(x, cy, 0, -1) for x in cols)[8]
     bottom = sorted(walk(x, cy, 0, 1) for x in cols)[-9]
+
+    # A frame may be open on a side - artwork only at the left and right, say, with
+    # nothing along the top and bottom. A walk that reached the edge of the image
+    # found no artwork there, so that pair of edges is unknown; the opening is then
+    # given the 4:3 shape of the footage it is for, centred, from the pair that is known.
+    open_vertically = top <= 1 and bottom >= height - 2
+    open_horizontally = left <= 1 and right >= width - 2
+    if open_vertically and not open_horizontally:
+        half = (right - left) * 3 / 4 / 2
+        top, bottom = round(cy - half), round(cy + half)
+    elif open_horizontally and not open_vertically:
+        half = (bottom - top) * 4 / 3 / 2
+        left, right = round(cx - half), round(cx + half)
     return left, top, right, bottom
 
 
@@ -140,7 +153,7 @@ def prepare_frame(settings: RenderSettings, cache_dir: Path) -> tuple[Path | Non
             raise RuntimeError(f"Frame image not found: {source}")
         stat = source.stat()
         tag = hashlib.sha1(
-            f"{source}|{stat.st_size}|{int(stat.st_mtime)}|{ENCODE_VERSION}|{frame_scale:.3f}".encode()
+            f"{source}|{stat.st_size}|{int(stat.st_mtime)}|{ENCODE_VERSION}|{frame_scale:.3f}|window-v2".encode()
         ).hexdigest()[:12]
         out, meta = cache_dir / f"frame_{tag}.png", cache_dir / f"frame_{tag}.json"
         if out.exists() and meta.exists():
@@ -283,11 +296,28 @@ def _segment_args(
     full_screen = settings.layout == "simple" or (settings.wide_full_screen and cw / ch >= WIDE_ASPECT)
     if full_screen:
         identity["layout"] = "simple"
-        graph = (
-            f"[0:v]{base},scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
-            f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:black[out]"
-        )
-        return [*seek, "-filter_complex", graph, "-map", "[out]", *encode], identity
+        wider_than_screen = cw / ch > WIDTH / HEIGHT + 0.01
+        fit_height = _even(WIDTH * ch / cw) if wider_than_screen else HEIGHT
+        fill = min(1.0, max(0.0, settings.wide_fill))
+        shown_height = _even(fit_height + (HEIGHT - fit_height) * fill)
+        if not wider_than_screen:
+            # as wide as the screen or narrower: fit it, black at the sides if any
+            graph = (
+                f"[0:v]{base},scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,"
+                f"pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2:black[out]"
+            )
+            return [*seek, "-filter_complex", graph, "-map", "[out]", *encode], identity
+        if shown_height >= HEIGHT:
+            # zoomed all the way: fills the screen, sides cropped
+            graph = f"[0:v]{base},scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT}[out]"
+            identity["wide_fill"] = 1.0
+            return [*seek, "-filter_complex", graph, "-map", "[out]", *encode], identity
+        # Wider than the screen and not fully zoomed: a full-width band with the
+        # blurred background above and below it - the framed composition without the
+        # frame or the rounded corners.
+        identity["wide_fill"] = fill
+        window = (0, (HEIGHT - shown_height) // 2, WIDTH, shown_height)
+        overlay, mask = None, None
 
     x, y, w, h = window
     keep = 1.0 - settings.dim
@@ -339,17 +369,102 @@ def _segment_args(
     return [*inputs, "-filter_complex", graph, "-map", "[out]", *encode], identity
 
 
-def render_preview(project: Project, slot_index: int) -> Path:
+FORMATS = ("4:3", "16:9", "wide")
+# picture size of a stand-in clip for each format, when no real footage of it exists
+PLACEHOLDER_SIZES = {"4:3": (1440, 1080), "16:9": (1920, 1080), "wide": (1920, 804)}
+
+
+def footage_format(path: str) -> str:
+    """Which of the three looks a source file gets: "4:3" (shown in the frame),
+    "16:9" (fills the screen) or "wide" (cinema format, wider than the screen)."""
+    cw, ch, _, _ = source_crop(path)
+    ratio = cw / ch
+    if ratio > 1.9:
+        return "wide"
+    return "16:9" if ratio >= WIDE_ASPECT else "4:3"
+
+
+def _placeholder(fmt: str) -> str:
+    """A stand-in clip of the given format: a soft gradient with a grid, so the
+    edges and proportions of the picture area are easy to see."""
+    width, height = PLACEHOLDER_SIZES[fmt]
+    path = DATA_DIR / f"editor_placeholder_{width}x{height}.mp4"
+    if not path.exists():
+        _run([
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",
+            "-i", f"gradients=s={width}x{height}:c0=0x27456b:c1=0xd08a4e:x0=0:y0=0:x1={width}:y1={height}:d=6:r={FPS_NUM}/{FPS_DEN}",
+            "-vf", f"drawgrid=w={width // 8}:h={height // 6}:t=2:c=white@0.35,drawbox=x=0:y=0:w={width}:h={height}:t=6:c=white@0.8",
+            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", str(path),
+        ])
+    return str(path)
+
+
+def preview_clips(project: Project, fmt: str | None) -> tuple[str, list[tuple[Candidate, float, float | None]]]:
+    """What the Look preview can show for a format: (where the clips come from,
+    [(clip, its length, its position on the narration clock or None)]).
+
+    The project's own clips of that format come first. A format the project has no
+    clip of is shown with footage of that format from the library, and if there is
+    none of that either, with a placeholder - so each format's settings can be
+    adjusted before any such clip is in the video."""
+    from sqlalchemy import select as sa_select
+
+    from app.db.models import Scene, Source
+    from app.db.session import SessionLocal
+    from app.editor.footage import _clip_window
+
+    own = [
+        (slot.candidates[slot.selected], slot.end - slot.start, slot.start)
+        for beat in project.beats for slot in beat.slots if slot.selected is not None
+    ]
+    if fmt is None:
+        return "project", own
+    matching = [item for item in own if footage_format(item[0].file_path) == fmt]
+    if matching:
+        return "project", matching
+
+    db = SessionLocal()
+    try:
+        # one episode per show is enough to tell a show's format
+        shows = list(store.project_shows(project))
+        shows += [t for t in db.execute(sa_select(Source.show_title).distinct()).scalars() if t and t not in shows]
+        for show in shows:
+            source = db.execute(sa_select(Source).where(Source.show_title == show).order_by(Source.id)).scalars().first()
+            if source is None or not Path(source.file_path).exists() or footage_format(source.file_path) != fmt:
+                continue
+            scenes = list(
+                db.execute(
+                    sa_select(Scene).where(Scene.source_id == source.id, Scene.end_time - Scene.start_time >= 4).order_by(Scene.start_time)
+                ).scalars()
+            )
+            if not scenes:
+                continue
+            clips = []
+            for scene in scenes[len(scenes) // 5 :: max(1, len(scenes) // 12)][:10]:
+                start, end = _clip_window(db, scene, source, 4.0, True)
+                clips.append((Candidate(
+                    scene_id=scene.id, source_id=source.id, file_path=source.file_path, show_title=source.show_title,
+                    scene_start=scene.start_time, scene_end=scene.end_time, clip_start=start, clip_end=end, score=0.0,
+                ), 4.0, None))
+            return "library", clips
+    finally:
+        db.close()
+
+    path = _placeholder(fmt)
+    clip = Candidate(scene_id=0, source_id=0, file_path=path, scene_start=0, scene_end=4, clip_start=1.0, clip_end=5.0, score=0.0)
+    return "placeholder", [(clip, 4.0, None)]
+
+
+def render_preview(project: Project, slot_index: int, fmt: str | None = None) -> Path:
     """One still of the finished look - clip, background, frame, rounding - for a
     single clip, using the project's current settings. Takes a second or two, so the
     look can be adjusted without rendering the whole video."""
-    slots = [(beat, slot) for beat in project.beats for slot in beat.slots if slot.selected is not None]
-    if not slots:
+    _, clips = preview_clips(project, fmt)
+    if not clips:
         raise RuntimeError("Find footage first - there is nothing to preview yet")
-    beat, slot = slots[slot_index % len(slots)]
-    chosen = slot.candidates[slot.selected]
+    chosen, duration, at = clips[slot_index % len(clips)]
     # the middle of the clip is more representative than its first frame
-    middle = (slot.end - slot.start) / 2
+    middle = duration / 2
     candidate = chosen.model_copy(update={"clip_start": chosen.clip_start + middle})
 
     folder = store.project_dir(project.id)
@@ -359,14 +474,17 @@ def render_preview(project: Project, slot_index: int) -> Path:
         overlay, window = prepare_frame(project.settings, cache_dir)
         window = scaled_window(project.settings, window)
         mask = prepare_mask(window[2], window[3], corner_radii(project.settings), cache_dir)
-        # the background track from the last render, if there is one; otherwise the
-        # preview falls back to a blurred copy of the clip, as an un-themed render would
-        tracks = sorted(cache_dir.glob("bgtrack_*.mp4"), key=lambda p: p.stat().st_mtime)
-        track = tracks[-1] if tracks and beat.backgrounds else None
+    # the background track from the last render, if there is one; otherwise the
+    # preview falls back to a blurred copy of the clip, as an un-themed render would
+    tracks = sorted(cache_dir.glob("bgtrack_*.mp4"), key=lambda p: p.stat().st_mtime) if cache_dir.exists() else []
+    track = tracks[-1] if tracks else None
+    # a clip that isn't on the narration clock (library footage, placeholder) is shown
+    # over a different stretch of the background each time
+    track_time = at + middle if at is not None else 20.0 + 11.0 * (slot_index % 12)
 
     args, _ = _segment_args(
         candidate, 1, project.settings, overlay, window,
-        track=track, track_frame=round((slot.start + middle) * FPS), track_identity=[], mask=mask,
+        track=track, track_frame=round(track_time * FPS), track_identity=[], mask=mask,
     )
     cache_dir.mkdir(exist_ok=True)
     out = cache_dir / "preview.jpg"

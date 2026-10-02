@@ -2,9 +2,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
-import type { EditorBeat, EditorJob, EditorProject, EditorStage } from "../api/client";
+import type { EditorBeat, EditorJob, EditorProject, EditorStage, LookFormat } from "../api/client";
 import LookPreview from "../components/LookPreview";
-import QuotesCard from "../components/QuotesCard";
+import QuotesCard, { AddQuoteCard } from "../components/QuotesCard";
 import RenderSettingsCard from "../components/RenderSettingsCard";
 import { SlotEditor, SlotThumb } from "../components/SlotEditor";
 
@@ -55,20 +55,10 @@ function StageRow({
 
   return (
     <div style={{ padding: "0.4rem 0", borderTop: "1px solid var(--border)" }}>
-      {/* button first, then name and state right next to it - nothing to scan across */}
-      <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-        <div style={{ width: "4.5rem", flexShrink: 0 }}>
-          {queuePosition > 0 ? (
-            <button className="ghost small" style={{ width: "100%" }} onClick={onUnqueue} title="Remove from the queue">
-              × cancel
-            </button>
-          ) : (
-            <button className="small" style={{ width: "100%" }} onClick={onRun} disabled={running || !canRun}>
-              {somethingRunning ? "Queue" : done ? "Re-run" : "Run"}
-            </button>
-          )}
-        </div>
-        <strong style={{ fontSize: "0.9rem", width: "7.5rem", flexShrink: 0, cursor: "help" }} title={description}>
+      {/* name, status, then the button straight after the status: the status column has
+          a fixed width, so the buttons of all stages line up */}
+      <div style={{ display: "grid", gridTemplateColumns: "7.5rem 19rem 5.5rem 1.2rem", alignItems: "center", gap: "0.6rem", justifyContent: "start" }}>
+        <strong style={{ fontSize: "0.9rem", cursor: "help" }} title={description}>
           {label}
         </strong>
         <span className="hint" style={{ margin: 0 }}>
@@ -82,15 +72,39 @@ function StageRow({
             state
           )}
         </span>
+        {queuePosition > 0 ? (
+          <button className="ghost small" onClick={onUnqueue} title="Remove from the queue">
+            × cancel
+          </button>
+        ) : (
+          <button className="small" onClick={onRun} disabled={running || !canRun}>
+            {somethingRunning ? "Queue" : done ? "Re-run" : "Run"}
+          </button>
+        )}
+        {/* a ring that fills when the stage can say how far along it is, a spinner when it can't */}
+        {running &&
+          (job?.progress != null ? (
+            <svg width="18" height="18" viewBox="0 0 18 18" role="img" aria-label={`${Math.round(job.progress * 100)}%`}>
+              <title>{Math.round(job.progress * 100)}%</title>
+              <circle cx="9" cy="9" r="7" fill="none" stroke="var(--bg-hover)" strokeWidth="2.5" />
+              <circle
+                cx="9"
+                cy="9"
+                r="7"
+                fill="none"
+                stroke="var(--accent)"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                // circumference of r=7 is ~44; the dash covers the done share of it
+                strokeDasharray={`${job.progress * 43.98} 43.98`}
+                transform="rotate(-90 9 9)"
+                style={{ transition: "stroke-dasharray 0.4s" }}
+              />
+            </svg>
+          ) : (
+            <span className="spinner" title="Working…" />
+          ))}
       </div>
-      {running && (
-        <div
-          className={job?.progress == null ? "progress indeterminate" : "progress"}
-          title={job?.progress == null ? "Waiting for Claude - no progress to report" : `${Math.round((job.progress ?? 0) * 100)}%`}
-        >
-          <div style={{ width: job?.progress == null ? "30%" : `${Math.round(job.progress * 100)}%` }} />
-        </div>
-      )}
       {job?.status === "error" && (
         <p className="error-text" style={{ margin: "0.3rem 0 0" }}>
           Failed: {job.error}
@@ -188,6 +202,8 @@ export default function EditorProjectPage() {
   const queryClient = useQueryClient();
   const audioRef = useRef<HTMLAudioElement>(null);
   const [playingBeat, setPlayingBeat] = useState<EditorBeat | null>(null);
+  // which kind of footage the Look preview shows; the settings sections switch it
+  const [lookFormat, setLookFormat] = useState<LookFormat>("4:3");
   // the open tab lives in the URL so a reload or a shared link lands on the same one
   const [searchParams, setSearchParams] = useSearchParams();
   const requested = searchParams.get("tab") as Tab | null;
@@ -207,6 +223,10 @@ export default function EditorProjectPage() {
 
   const runMutation = useMutation({
     mutationFn: (stage: EditorStage) => api.runEditorStage(id, stage),
+    onSuccess: setProject,
+  });
+  const settingsMutation = useMutation({
+    mutationFn: (payload: Parameters<typeof api.updateEditorProject>[1]) => api.updateEditorProject(id, payload),
     onSuccess: setProject,
   });
   const unqueueMutation = useMutation({
@@ -261,6 +281,10 @@ export default function EditorProjectPage() {
   const beatsWithBackground = project.beats.filter((b) => b.backgrounds.length > 0).length;
 
   const approvedQuotes = project.quotes.filter((q) => q.status === "approved").length;
+  // a beat whose number of clips no longer matches the limit was split under an older setting
+  const clipsStale = project.beats.some(
+    (b) => b.slots.length > 0 && b.slots.length !== Math.max(1, Math.ceil((b.end - b.start) / project.settings.max_clip_seconds - 1e-6))
+  );
   const stages: { key: EditorStage; label: string; description: string; state: string; done: boolean; ready: boolean }[] = [
     {
       key: "transcribe",
@@ -415,6 +439,28 @@ export default function EditorProjectPage() {
             <p className="hint" style={{ marginTop: 0 }}>
               Hover a name to see what the stage does. Running a stage while another is working puts it in the queue.
             </p>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.5rem" }}>
+              <label style={{ margin: 0 }} title="A beat longer than this is split into equal clips. Longer clips: fewer cuts and less flicker, but more footage around the moment that was searched for.">
+                Longest clip
+              </label>
+              <select
+                style={{ width: "auto" }}
+                value={project.settings.max_clip_seconds}
+                disabled={busy}
+                onChange={(e) => settingsMutation.mutate({ max_clip_seconds: Number(e.target.value) })}
+              >
+                {[4, 5, 6, 7, 8, 10].map((n) => (
+                  <option key={n} value={n}>
+                    {n} seconds
+                  </option>
+                ))}
+              </select>
+              {clipsStale && (
+                <span className="hint" style={{ margin: 0 }}>
+                  Clips were made with a different limit - run Shot queries, then Find footage, to apply it.
+                </span>
+              )}
+            </div>
             {stages.map((stage) => (
               <StageRow
                 key={stage.key}
@@ -435,8 +481,9 @@ export default function EditorProjectPage() {
         </>
       )}
 
-      {tab === "quotes" &&
-        (project.quotes.length > 0 ? (
+      {tab === "quotes" && (
+        <>
+          {project.quotes.length > 0 ? (
           <QuotesCard project={project} disabled={busy} onChange={setProject} />
         ) : (
           <div className="card">
@@ -448,8 +495,10 @@ export default function EditorProjectPage() {
               Search for quotes
             </button>
             {project.word_count === 0 && <span className="hint"> Transcribe the narration first.</span>}
-          </div>
-        ))}
+          </div>)}
+          <AddQuoteCard project={project} shows={availableShows} disabled={busy} onChange={setProject} />
+        </>
+      )}
 
       {tab === "clips" &&
         (project.beats.length > 0 ? (
@@ -489,10 +538,10 @@ export default function EditorProjectPage() {
         <>
           <div className="look-layout">
             <div>
-              <RenderSettingsCard project={project} disabled={busy} onChange={setProject} />
+              <RenderSettingsCard project={project} disabled={busy} format={lookFormat} onFormat={setLookFormat} onChange={setProject} />
               <div style={{ marginTop: "0.75rem" }}>{renderButton}</div>
             </div>
-            <LookPreview project={project} />
+            <LookPreview project={project} format={lookFormat} onFormat={setLookFormat} />
           </div>
         </>
       )}

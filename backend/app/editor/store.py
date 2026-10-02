@@ -77,10 +77,12 @@ class Candidate(BaseModel):
     text_score: float | None = None
     visual_score: float | None = None
     score: float
+    # pieces of a shot too short to read (a flicker) that the clip would contain
+    slivers: int = 0
 
 
 class Slot(BaseModel):
-    """One clip's worth of screen time inside a beat (at most MAX_CLIP_SECONDS)."""
+    """One clip's worth of screen time inside a beat (at most the project's max_clip_seconds, give or take a shift onto a cut)."""
 
     # seconds on the narration clock
     start: float
@@ -157,6 +159,10 @@ class Job(BaseModel):
 class RenderSettings(BaseModel):
     layout: str = "framed"  # "framed" (clip in a frame over a blurred background) | "simple" (full screen)
     search_mode: str = "smart_hybrid"  # "smart_hybrid" | "text" | "visual"
+    # Longest a single clip may run. A beat longer than this is split into equal
+    # clips. Longer clips mean fewer, calmer cuts and less flicker, but more of the
+    # footage around the moment that was actually searched for.
+    max_clip_seconds: float = 7.0
     # framed layout only. frame: "border" (plain outline), "none", or the name of a
     # PNG in <projects root>/_frames whose transparent opening the clip sits under
     frame: str = "border"
@@ -171,6 +177,10 @@ class RenderSettings(BaseModel):
     # when set it replaces corner_radius
     corner_radii: list[int] | None = None
     wide_full_screen: bool = True  # framed layout: widescreen sources fill the screen, no frame
+    # Footage wider than the screen (a 2.39:1 film) can't fill it without losing its
+    # sides. 0 = show all of it, with the blurred background above and below;
+    # 1 = zoom in until it fills the height, cropping the sides; anything between.
+    wide_fill: float = 0.0
 
 
 class Project(BaseModel):

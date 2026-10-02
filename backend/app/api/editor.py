@@ -39,10 +39,12 @@ class ProjectUpdateIn(BaseModel):
     shows: list[str] | None = None
     layout: str | None = None
     search_mode: str | None = None
+    max_clip_seconds: float | None = None
     frame: str | None = None
     blur: float | None = None
     dim: float | None = None
     corner_radius: int | None = None
+    wide_fill: float | None = None
     clip_scale: float | None = None
     frame_scale: float | None = None
     corner_radii: list[int] | None = None
@@ -131,6 +133,8 @@ def update_project(project_id: str, payload: ProjectUpdateIn) -> Project:
             p.settings.dim = min(0.9, max(0.0, data["dim"]))
         if data.get("corner_radius") is not None:
             p.settings.corner_radius = min(300, max(0, data["corner_radius"]))
+        if data.get("max_clip_seconds") is not None:
+            p.settings.max_clip_seconds = min(15.0, max(2.0, data["max_clip_seconds"]))
         if data.get("frame_scale") is not None:
             p.settings.frame_scale = min(1.5, max(0.4, data["frame_scale"]))
         if data.get("clip_scale") is not None:
@@ -140,6 +144,8 @@ def update_project(project_id: str, payload: ProjectUpdateIn) -> Project:
             p.settings.corner_radii = [min(300, max(0, int(r))) for r in radii] if radii and len(radii) == 4 else None
         if data.get("background_speed") is not None:
             p.settings.background_speed = min(1.0, max(0.25, data["background_speed"]))
+        if data.get("wide_fill") is not None:
+            p.settings.wide_fill = min(1.0, max(0.0, data["wide_fill"]))
         if data.get("wide_full_screen") is not None:
             p.settings.wide_full_screen = data["wide_full_screen"]
 
@@ -365,16 +371,178 @@ def get_output(project_id: str):
     return FileResponse(path, media_type="video/mp4")
 
 
+class SlotManualIn(BaseModel):
+    # either a scene (the clip is cut around its indexed picture, on shot cuts)...
+    scene_id: int | None = None
+    # ...or an episode and the exact second the clip should begin
+    source_id: int | None = None
+    start: float | None = None
+
+
+@router.post("/projects/{project_id}/beats/{beat_id}/slots/{slot_index}/manual", response_model=Project)
+def set_slot_manually(project_id: str, beat_id: str, slot_index: int, payload: SlotManualIn) -> Project:
+    """Puts a moment the user picked by hand into a slot - for footage the search
+    doesn't offer, because it is already used elsewhere or the index doesn't find it.
+    The clip starts at the given time and runs for the slot's length; the slot is
+    locked so automatic selection keeps it."""
+    from sqlalchemy import select as sa_select
+
+    from app.db.models import Scene, Source
+    from app.db.session import SessionLocal
+    from app.editor.footage import _clip_window, count_slivers
+    from app.editor.store import Candidate
+
+    project = _editable(project_id, beat_id, slot_index)
+    slot = next(b for b in project.beats if b.id == beat_id).slots[slot_index]
+    duration = slot.end - slot.start
+
+    db = SessionLocal()
+    try:
+        if payload.scene_id is not None:
+            scene = db.get(Scene, payload.scene_id)
+            if scene is None:
+                raise HTTPException(404, "Scene not found")
+            source = db.get(Source, scene.source_id)
+            # same placement as the automatic selection: around the indexed frame, no slivers
+            start, _ = _clip_window(db, scene, source, duration, True)
+        elif payload.source_id is not None and payload.start is not None:
+            source = db.get(Source, payload.source_id)
+            if source is None:
+                raise HTTPException(404, "Episode not found")
+            start = max(0.0, payload.start)
+            if source.duration_seconds and start + duration > source.duration_seconds:
+                raise HTTPException(400, "The clip would run past the end of the episode")
+            # the scene at that moment, for the thumbnail and description
+            scene = db.execute(
+                sa_select(Scene).where(Scene.source_id == source.id, Scene.start_time <= start, Scene.end_time > start)
+            ).scalars().first()
+        else:
+            raise HTTPException(400, "Give a scene, or an episode and a start time")
+        candidate = Candidate(
+            scene_id=scene.id if scene else 0,
+            source_id=source.id,
+            file_path=source.file_path,
+            show_title=source.show_title,
+            book=source.book,
+            episode_number=source.episode_number,
+            scene_start=scene.start_time if scene else start,
+            scene_end=scene.end_time if scene else start + duration,
+            clip_start=round(start, 3),
+            clip_end=round(start + duration, 3),
+            description=scene.context_description if scene else None,
+            score=0.0,
+            slivers=count_slivers(db, source.id, start, start + duration),
+        )
+    finally:
+        db.close()
+
+    def apply(p: Project) -> None:
+        target = next(b for b in p.beats if b.id == beat_id).slots[slot_index]
+        # first in the list, so it sits where the chosen clip is shown; earlier hand
+        # picks for this slot are replaced rather than piling up
+        target.candidates = [candidate] + [c for c in target.candidates if c.score != 0.0 or c.text_score is not None or c.visual_score is not None]
+        target.candidates = target.candidates[:9]
+        target.selected = 0
+        target.locked = True
+
+    return store.update_project(project_id, apply)
+
+
+class QuoteCreateIn(BaseModel):
+    source_id: int
+    clip_start: float
+    clip_end: float
+    # narration word the clip plays after; None = at the very end
+    after_word: int | None = None
+
+
+@router.post("/projects/{project_id}/quotes", response_model=Project)
+def add_quote(project_id: str, payload: QuoteCreateIn) -> Project:
+    """Adds a clip the user picked by hand - an episode and a time range - instead of
+    one found by the quote search. It goes straight into the video."""
+    import uuid
+
+    from app.db.models import Source
+    from app.db.session import SessionLocal
+    from app.editor.quotes import resolve_placement, text_between
+    from app.editor.store import Quote
+
+    project = _load(project_id)
+    if project.job and project.job.status == "running":
+        raise HTTPException(409, "A stage is running - wait for it to finish")
+    if payload.clip_end - payload.clip_start < 0.5:
+        raise HTTPException(400, "The clip must end after it starts")
+    if payload.clip_end - payload.clip_start > 180:
+        raise HTTPException(400, "A clip can be at most three minutes long")
+
+    db = SessionLocal()
+    try:
+        source = db.get(Source, payload.source_id)
+        if source is None:
+            raise HTTPException(404, "Episode not found")
+        if source.duration_seconds and payload.clip_end > source.duration_seconds + 1:
+            raise HTTPException(400, "The clip runs past the end of the episode")
+        details = {
+            "source_id": source.id, "file_path": source.file_path, "show_title": source.show_title,
+            "book": source.book, "episode_number": source.episode_number,
+        }
+    finally:
+        db.close()
+
+    words = store.load_words(project_id)
+    if not words:
+        raise HTTPException(400, "Transcribe the narration first - a clip is placed between its sentences")
+    text = text_between(payload.source_id, payload.clip_start, payload.clip_end)
+
+    def apply(p: Project) -> None:
+        target = len(words) - 1 if payload.after_word is None else payload.after_word
+        after_word, at, before = resolve_placement(p, words, target)
+        p.quotes.append(
+            Quote(
+                id=f"quote_{uuid.uuid4().hex[:8]}",
+                status="approved",
+                after_word=after_word,
+                at=at,
+                after_text=before,
+                clip_start=round(max(0.0, payload.clip_start), 3),
+                clip_end=round(payload.clip_end, 3),
+                text=text or "(no dialogue)",
+                speaker="",
+                reason="Added by hand.",
+                **details,
+            )
+        )
+        p.quotes.sort(key=lambda q: q.at)
+
+    return store.update_project(project_id, apply)
+
+
+@router.delete("/projects/{project_id}/quotes/{quote_id}", response_model=Project)
+def delete_quote(project_id: str, quote_id: str) -> Project:
+    project = _load(project_id)
+    if project.job and project.job.status == "running":
+        raise HTTPException(409, "A stage is running - wait for it to finish")
+
+    def apply(p: Project) -> None:
+        p.quotes = [q for q in p.quotes if q.id != quote_id]
+
+    return store.update_project(project_id, apply)
+
+
 class QuoteUpdateIn(BaseModel):
     status: str | None = None
     after_word: int | None = None
+    # seconds in the episode; either can be given alone to move one end of the clip
+    clip_start: float | None = None
+    clip_end: float | None = None
 
 
 @router.patch("/projects/{project_id}/quotes/{quote_id}", response_model=Project)
 def update_quote(project_id: str, quote_id: str, payload: QuoteUpdateIn) -> Project:
-    """Approve/reject a proposed quote, or move it. Once beats exist a quote can
-    only sit between two beats, so the position snaps to the nearest boundary."""
-    from app.editor.quotes import resolve_placement
+    """Approve/reject a proposed quote, move it, or change where its clip starts and
+    ends in the episode. Once beats exist a quote can only sit between two beats, so
+    the position snaps to the nearest boundary."""
+    from app.editor.quotes import resolve_placement, text_between
 
     project = _load(project_id)
     if project.job and project.job.status == "running":
@@ -385,8 +553,25 @@ def update_quote(project_id: str, quote_id: str, payload: QuoteUpdateIn) -> Proj
         raise HTTPException(400, f"Unknown status: {payload.status}")
     words = store.load_words(project_id)
 
+    current = next(q for q in project.quotes if q.id == quote_id)
+    new_start = current.clip_start if payload.clip_start is None else max(0.0, payload.clip_start)
+    new_end = current.clip_end if payload.clip_end is None else payload.clip_end
+    retimed = (new_start, new_end) != (current.clip_start, current.clip_end)
+    new_text = None
+    if retimed:
+        if new_end - new_start < 0.5:
+            raise HTTPException(400, "The clip must end after it starts")
+        if new_end - new_start > 180:
+            raise HTTPException(400, "A quote can be at most three minutes long")
+        # the words shown for the quote follow the clip
+        new_text = text_between(current.source_id, new_start, new_end)
+
     def apply(p: Project) -> None:
         quote = next(q for q in p.quotes if q.id == quote_id)
+        if retimed:
+            quote.clip_start, quote.clip_end = round(new_start, 3), round(new_end, 3)
+            if new_text:
+                quote.text = new_text
         if payload.status is not None:
             quote.status = payload.status
         if payload.after_word is not None:
@@ -397,16 +582,33 @@ def update_quote(project_id: str, quote_id: str, payload: QuoteUpdateIn) -> Proj
 
 
 @router.get("/projects/{project_id}/preview")
-def get_preview(project_id: str, slot: int = 0):
-    """A still of one clip with the project's current look applied."""
-    from app.editor.render import render_preview
+def get_preview(project_id: str, slot: int = 0, format: str | None = None):
+    """A still of one clip with the project's current look applied. `format` ("4:3",
+    "16:9" or "wide") asks for a clip of that format - from the project, the library,
+    or a placeholder."""
+    from app.editor.render import FORMATS, render_preview
 
     project = _load(project_id)
+    if format is not None and format not in FORMATS:
+        raise HTTPException(400, f"Unknown format: {format}")
     try:
-        path = render_preview(project, slot)
+        path = render_preview(project, slot, format)
     except RuntimeError as exc:
         raise HTTPException(400, str(exc))
     return Response(path.read_bytes(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/projects/{project_id}/preview-info")
+def get_preview_info(project_id: str) -> dict:
+    """For each format: where its preview clips come from and how many there are."""
+    from app.editor.render import FORMATS, preview_clips
+
+    project = _load(project_id)
+    info = {}
+    for fmt in FORMATS:
+        source, clips = preview_clips(project, fmt)
+        info[fmt] = {"source": source, "count": len(clips)}
+    return info
 
 
 @router.get("/default-look")

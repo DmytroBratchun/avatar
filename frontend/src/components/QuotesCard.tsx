@@ -1,7 +1,7 @@
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api/client";
-import type { EditorProject, EditorQuote } from "../api/client";
+import type { EditorProject, EditorQuote, EditorWord } from "../api/client";
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -9,24 +9,71 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+/** Time as m:ss.s, precise enough to cut on. */
+function clock(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  return `${m}:${(seconds - m * 60).toFixed(1).padStart(4, "0")}`;
+}
+
+/** "8:18", "8:18.5" or plain seconds -> seconds; null if it isn't a time. */
+function parseClock(value: string): number | null {
+  const match = value.trim().match(/^(?:(\d+):)?(\d+(?:\.\d+)?)$/);
+  if (!match) return null;
+  return Number(match[1] ?? 0) * 60 + Number(match[2]);
+}
+
+const endsSentence = (word: string) => /[.!?…]["']?$/.test(word);
+
+// how much narration to show either side of a quote: whole sentences, until there are
+// at least this many words (a lone "And Zaheer proved it." says nothing by itself)
+const CONTEXT_WORDS = 35;
+
+/** The narration leading up to word `afterWord` and the narration that follows it. */
+function around(words: EditorWord[], afterWord: number): { before: string; after: string } {
+  if (words.length === 0) return { before: "", after: "" };
+  let start = afterWord;
+  // back to the start of a sentence, and further back while the context is still short
+  while (start > 0 && (!endsSentence(words[start - 1].text) || afterWord - start + 1 < CONTEXT_WORDS)) start--;
+  let end = afterWord + 1;
+  while (end < words.length - 1 && (!endsSentence(words[end].text) || end - afterWord < CONTEXT_WORDS)) end++;
+  return {
+    before: words.slice(start, afterWord + 1).map((w) => w.text).join(" "),
+    after: afterWord + 1 < words.length ? words.slice(afterWord + 1, end + 1).map((w) => w.text).join(" ") : "",
+  };
+}
+
 function QuoteRow({
   project,
   quote,
+  words,
   disabled,
   onChange,
 }: {
   project: EditorProject;
   quote: EditorQuote;
+  words: EditorWord[];
   disabled: boolean;
   onChange: (project: EditorProject) => void;
 }) {
   const [previewing, setPreviewing] = useState(false);
+  const [editing, setEditing] = useState(false);
   const mutation = useMutation({
-    mutationFn: (payload: { status?: string; after_word?: number }) => api.updateEditorQuote(project.id, quote.id, payload),
+    mutationFn: (payload: { status?: string; after_word?: number; clip_start?: number; clip_end?: number }) =>
+      api.updateEditorQuote(project.id, quote.id, payload),
     onSuccess: onChange,
   });
-  const busy = disabled || mutation.isPending;
+  const removeMutation = useMutation({
+    mutationFn: () => api.deleteEditorQuote(project.id, quote.id),
+    onSuccess: onChange,
+  });
+  const busy = disabled || mutation.isPending || removeMutation.isPending;
   const length = quote.clip_end - quote.clip_start;
+  const context = around(words, quote.after_word);
+  const [startText, setStartText] = useState(clock(quote.clip_start));
+  const [endText, setEndText] = useState(clock(quote.clip_end));
+  const newStart = parseClock(startText);
+  const newEnd = parseClock(endText);
+  const rangeChanged = newStart !== null && newEnd !== null && (clock(newStart) !== clock(quote.clip_start) || clock(newEnd) !== clock(quote.clip_end));
 
   return (
     <div style={{ padding: "0.6rem 0", borderTop: "1px solid var(--border, rgba(128,128,128,0.25))" }}>
@@ -36,35 +83,27 @@ function QuoteRow({
         </span>
         <strong>{quote.speaker || "unknown"}</strong>
         <span className="hint" style={{ margin: 0 }}>
-          Book {quote.book ?? "?"} Ep {quote.episode_number ?? "?"} · {formatTime(quote.clip_start)} · {length.toFixed(1)}s
+          Book {quote.book ?? "?"} Ep {quote.episode_number ?? "?"} · {formatTime(quote.clip_start)} · {length.toFixed(1)}s · placed at {formatTime(quote.at)} of the narration
         </span>
       </div>
-      <p style={{ margin: "0.3rem 0" }}>“{quote.text}”</p>
-      <p className="hint" style={{ margin: 0 }}>{quote.reason}</p>
 
-      <div style={{ marginTop: "0.4rem", display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-        <span className="hint" style={{ margin: 0 }}>Plays after</span>
-        {project.beats.length > 0 ? (
-          <select
-            style={{ width: "auto", maxWidth: "420px" }}
-            value={quote.after_word}
-            disabled={busy}
-            onChange={(e) => mutation.mutate({ after_word: Number(e.target.value) })}
-          >
-            {project.beats.map((beat) => (
-              <option key={beat.id} value={beat.word_end}>
-                {formatTime(beat.end)} - …{beat.text.slice(-60)}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <span style={{ fontSize: "0.85rem" }}>
-            {formatTime(quote.at)} - …{quote.after_text.slice(-60)}
-          </span>
-        )}
+      {/* the quote where it will sit: the narration before it, the quote, the narration after */}
+      <div style={{ margin: "0.4rem 0", fontSize: "0.9rem" }}>
+        <p className="hint" style={{ margin: 0 }}>
+          …{context.before || quote.after_text}
+        </p>
+        <p
+          style={{ margin: "0.25rem 0", paddingLeft: "0.6rem", borderLeft: "3px solid var(--accent)", cursor: "help" }}
+          title={quote.reason}
+        >
+          “{quote.text}”
+        </p>
+        <p className="hint" style={{ margin: 0 }}>
+          {context.after ? `${context.after}…` : "(end of the narration)"}
+        </p>
       </div>
 
-      <div style={{ marginTop: "0.5rem", display: "flex", gap: "0.5rem" }}>
+      <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
         <button className="ghost small" onClick={() => setPreviewing((v) => !v)}>
           {previewing ? "Hide clip" : "Play clip"}
         </button>
@@ -83,15 +122,164 @@ function QuoteRow({
             Reject
           </button>
         )}
+        <button className="ghost small" onClick={() => setEditing((v) => !v)}>
+          {editing ? "Done" : "Edit"}
+        </button>
+        <button className="ghost small" onClick={() => removeMutation.mutate()} disabled={busy} title="Remove this clip from the list">
+          Delete
+        </button>
       </div>
+
+      {editing && (
+        <div style={{ marginTop: "0.5rem", display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+          <span className="hint" style={{ margin: 0 }} title="Where the clip starts and ends in the episode, as minutes:seconds">
+            Clip in the episode from
+          </span>
+          <input style={{ width: "5.5rem" }} value={startText} onChange={(e) => setStartText(e.target.value)} disabled={busy} />
+          <span className="hint" style={{ margin: 0 }}>to</span>
+          <input style={{ width: "5.5rem" }} value={endText} onChange={(e) => setEndText(e.target.value)} disabled={busy} />
+          <button
+            className="small"
+            disabled={busy || !rangeChanged}
+            onClick={() => newStart !== null && newEnd !== null && mutation.mutate({ clip_start: newStart, clip_end: newEnd })}
+          >
+            Apply
+          </button>
+          {(newStart === null || newEnd === null) && <span className="error-text">Use a time like 8:18 or 8:18.5</span>}
+        </div>
+      )}
+      {editing && (
+        <div style={{ marginTop: "0.5rem", display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+          <span className="hint" style={{ margin: 0 }}>Plays after</span>
+          {project.beats.length > 0 ? (
+            <select
+              style={{ width: "auto", maxWidth: "460px" }}
+              value={quote.after_word}
+              disabled={busy}
+              onChange={(e) => mutation.mutate({ after_word: Number(e.target.value) })}
+            >
+              {project.beats.map((beat) => (
+                <option key={beat.id} value={beat.word_end}>
+                  {formatTime(beat.end)} - …{beat.text.slice(-60)}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <span className="hint" style={{ margin: 0 }}>
+              the place can be changed once beats are built - a quote sits between two beats
+            </span>
+          )}
+        </div>
+      )}
+
       {previewing && (
         <video
           src={`${api.streamUrl(quote.source_id)}#t=${quote.clip_start},${quote.clip_end}`}
           controls
           autoPlay
-          style={{ width: "100%", maxWidth: "480px", marginTop: "0.5rem" }}
+          style={{ width: "100%", maxWidth: "480px", marginTop: "0.5rem", display: "block" }}
         />
       )}
+      {mutation.isError && <p className="error-text">{(mutation.error as Error).message}</p>}
+    </div>
+  );
+}
+
+/** Add a clip by hand: pick the episode and the time range instead of searching for a quote. */
+export function AddQuoteCard({
+  project,
+  shows,
+  disabled,
+  onChange,
+}: {
+  project: EditorProject;
+  // shows this project may use; empty = any
+  shows: string[];
+  disabled: boolean;
+  onChange: (project: EditorProject) => void;
+}) {
+  const { data: sources } = useQuery({ queryKey: ["sources"], queryFn: api.listSources });
+  const episodes = (sources ?? []).filter((s) => shows.length === 0 || (s.show_title !== null && shows.includes(s.show_title)));
+  const [sourceId, setSourceId] = useState<number | "">("");
+  const [startText, setStartText] = useState("");
+  const [endText, setEndText] = useState("");
+  // "" = at the very end of the narration
+  const [afterWord, setAfterWord] = useState<number | "">("");
+  const start = parseClock(startText);
+  const end = parseClock(endText);
+  const valid = sourceId !== "" && start !== null && end !== null && end > start;
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      api.addEditorQuote(project.id, {
+        source_id: sourceId as number,
+        clip_start: start as number,
+        clip_end: end as number,
+        after_word: afterWord === "" ? undefined : afterWord,
+      }),
+    onSuccess: (p) => {
+      onChange(p);
+      setStartText("");
+      setEndText("");
+    },
+  });
+
+  return (
+    <div className="card" style={{ marginTop: "0.75rem" }}>
+      <h3>Add a clip by hand</h3>
+      <p className="hint" style={{ marginTop: 0 }}>
+        A stretch of an episode you already have in mind, played with its own sound - no search. It goes straight into
+        the video; the scene page of an episode shows exact times for every line and shot.
+      </p>
+      <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
+        <select
+          style={{ width: "auto", maxWidth: "360px" }}
+          value={sourceId}
+          disabled={disabled}
+          onChange={(e) => setSourceId(e.target.value === "" ? "" : Number(e.target.value))}
+        >
+          <option value="">Episode…</option>
+          {episodes.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.show_title} · {s.book != null ? `Book ${s.book} ` : ""}
+              {s.episode_number != null ? `Ep ${s.episode_number} · ` : ""}
+              {(s.episode_title ?? "").split(" - ").pop()}
+            </option>
+          ))}
+        </select>
+        <span className="hint" style={{ margin: 0 }}>from</span>
+        <input style={{ width: "5.5rem" }} placeholder="8:18" value={startText} onChange={(e) => setStartText(e.target.value)} disabled={disabled} />
+        <span className="hint" style={{ margin: 0 }}>to</span>
+        <input style={{ width: "5.5rem" }} placeholder="8:44" value={endText} onChange={(e) => setEndText(e.target.value)} disabled={disabled} />
+      </div>
+      <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap", marginTop: "0.5rem" }}>
+        <span className="hint" style={{ margin: 0 }}>Plays after</span>
+        {project.beats.length > 0 ? (
+          <select
+            style={{ width: "auto", maxWidth: "460px" }}
+            value={afterWord}
+            disabled={disabled}
+            onChange={(e) => setAfterWord(e.target.value === "" ? "" : Number(e.target.value))}
+          >
+            <option value="">the end of the narration</option>
+            {project.beats.map((beat) => (
+              <option key={beat.id} value={beat.word_end}>
+                {formatTime(beat.end)} - …{beat.text.slice(-60)}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <span className="hint" style={{ margin: 0 }}>
+            the end of the narration (it can be moved once beats are built)
+          </span>
+        )}
+        <button className="small primary" onClick={() => mutation.mutate()} disabled={disabled || !valid || mutation.isPending}>
+          Add to video
+        </button>
+        {(startText || endText) && !valid && sourceId !== "" && (
+          <span className="error-text">Use times like 8:18 or 8:18.5, the end after the start</span>
+        )}
+      </div>
       {mutation.isError && <p className="error-text">{(mutation.error as Error).message}</p>}
     </div>
   );
@@ -106,6 +294,13 @@ export default function QuotesCard({
   disabled: boolean;
   onChange: (project: EditorProject) => void;
 }) {
+  // the narration's words, to show each quote between the sentences around it
+  const { data: words } = useQuery({
+    queryKey: ["editorTranscript", project.id, project.word_count],
+    queryFn: () => api.getEditorTranscript(project.id),
+    enabled: project.quotes.length > 0,
+  });
+
   if (project.quotes.length === 0) return null;
   const approved = project.quotes.filter((q) => q.status === "approved");
   const added = approved.reduce((sum, q) => sum + (q.clip_end - q.clip_start), 0);
@@ -120,11 +315,12 @@ export default function QuotesCard({
         </span>
       </div>
       <p className="hint">
-        Clips from the show that play with their own sound between two parts of the narration. Only quotes you add are
-        used; render again to see them.
+        Clips from the show that play with their own sound between two parts of the narration, shown here between the
+        sentences they would sit between. Hover a quote to see why it was suggested. Only quotes you add are used;
+        render again to see them.
       </p>
       {project.quotes.map((quote) => (
-        <QuoteRow key={quote.id} project={project} quote={quote} disabled={disabled} onChange={onChange} />
+        <QuoteRow key={`${quote.id}-${quote.clip_start}-${quote.clip_end}`} project={project} quote={quote} words={words ?? []} disabled={disabled} onChange={onChange} />
       ))}
     </div>
   );

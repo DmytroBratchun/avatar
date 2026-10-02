@@ -20,7 +20,13 @@ from app.pipeline.stages.extract_keyframes import _OFFSETS_BY_COUNT
 from app.services.embeddings import embed_text, embed_text_for_visual_search
 from app.vectorstore.sqlite_vec_client import _serialize, knn_text, knn_visual
 
-MAX_CLIP_SECONDS = 5.0
+# A piece of a shot shorter than this inside a clip reads as a flicker, not as a shot.
+MIN_FRAGMENT_SECONDS = 0.8
+# how far a clip may run longer or shorter than its even share of the beat, to end on a cut
+FLEX_SECONDS = 1.0
+MIN_CLIP_SECONDS = 1.5
+# a clip with a flicker in it loses this much per flicker against a clean one
+SLIVER_PENALTY = 0.75
 KNN_K = 30
 CANDIDATES_PER_SLOT = 8
 BACKGROUND_SAMPLE = 400
@@ -94,10 +100,80 @@ def _scored(hits: list[tuple[int, float]], background: tuple[float, float] | Non
     return {scene_id: (mean - distance) / spread for scene_id, distance in hits}
 
 
+def shot_fragments(cuts: list[float], start: float, end: float) -> list[float]:
+    """Lengths of the pieces a clip [start, end] is cut into by the shot cuts inside it."""
+    inner = [c for c in cuts if start + 1e-3 < c < end - 1e-3]
+    edges = [start, *inner, end]
+    return [later - earlier for earlier, later in zip(edges, edges[1:])]
+
+
+def _cuts(db: Session, source_id: int, start: float, end: float) -> list[float]:
+    """Shot cuts of a source between two times (with a little either side)."""
+    shots = db.execute(
+        select(Shot.start_time, Shot.end_time).where(
+            Shot.source_id == source_id, Shot.end_time > start - 1, Shot.start_time < end + 1
+        )
+    ).all()
+    return sorted({t for shot in shots for t in shot})
+
+
+def count_slivers(db: Session, source_id: int, start: float, end: float) -> int:
+    pieces = shot_fragments(_cuts(db, source_id, start, end), start, end)
+    return sum(1 for piece in pieces if piece < MIN_FRAGMENT_SECONDS)
+
+
+def fit_to_duration(db: Session, slot: Slot) -> None:
+    """After a slot's length changes, every candidate keeps its start and gets the
+    new length; their flicker counts are measured again."""
+    duration = slot.end - slot.start
+    for candidate in slot.candidates:
+        candidate.clip_end = round(candidate.clip_start + duration, 3)
+        candidate.slivers = count_slivers(db, candidate.source_id, candidate.clip_start, candidate.clip_end)
+
+
+def end_on_a_cut(db: Session, slot: Slot, following: Slot, max_clip_seconds: float) -> bool:
+    """Clips in a beat share its time evenly, which is arbitrary - the footage has
+    its own rhythm. If the chosen clip ends a moment before or after a cut, leaving a
+    flicker, this moves the boundary between the two slots onto the cut: this clip
+    runs a little longer or shorter and the next one makes up the difference.
+    Returns True if the boundary moved."""
+    if slot.selected is None:
+        return False
+    chosen = slot.candidates[slot.selected]
+    duration = slot.end - slot.start
+    if chosen.slivers == 0:
+        return False
+    room = following.end - slot.start  # this clip and the next one together
+    best = None
+    for cut in _cuts(db, chosen.source_id, chosen.clip_start, chosen.clip_start + duration + FLEX_SECONDS):
+        length = cut - chosen.clip_start
+        if abs(length - duration) > FLEX_SECONDS or length < MIN_CLIP_SECONDS:
+            continue
+        if not MIN_CLIP_SECONDS <= room - length <= max_clip_seconds + FLEX_SECONDS:
+            continue
+        slivers = count_slivers(db, chosen.source_id, chosen.clip_start, cut)
+        key = (slivers, abs(length - duration))
+        if slivers < chosen.slivers and (best is None or key < best[0]):
+            best = (key, length)
+    if best is None:
+        return False
+    slot.end = round(slot.start + best[1], 3)
+    following.start = slot.end
+    fit_to_duration(db, slot)
+    return True
+
+
 def _clip_window(db: Session, scene: Scene, source: Source, duration: float, anchor_on_keyframe: bool) -> tuple[float, float]:
-    """Where in the source to cut `duration` seconds for this scene. A visual match
-    is a match on one keyframe, so the clip is taken around that frame rather than
-    the scene's centre; it is kept inside a single shot when the shot is long enough."""
+    """Where in the source to cut `duration` seconds for this scene.
+
+    The clip has to contain the moment the scene was found by (a visual match is a
+    match on one keyframe; for a caption match the middle of the scene stands in).
+    Around that moment the window can slide, and where it sits matters: if it starts
+    a few frames before a cut, the clip opens with a flash of the previous shot.
+    So every sensible position is tried - centred on the moment, and starting or
+    ending exactly on each nearby cut - and the one with no sliver of a shot wins,
+    then the one with the fewest cuts, then the one that stays inside the scene and
+    keeps the moment nearest its middle."""
     scene_length = scene.end_time - scene.start_time
     offsets = _OFFSETS_BY_COUNT.get(len(scene.keyframe_paths or []))
     if anchor_on_keyframe and offsets:
@@ -105,18 +181,37 @@ def _clip_window(db: Session, scene: Scene, source: Source, duration: float, anc
     else:
         anchor = scene.start_time + scene_length / 2
 
-    shot = db.execute(
-        select(Shot).where(Shot.source_id == scene.source_id, Shot.start_time <= anchor, Shot.end_time > anchor)
-    ).scalars().first()
-    low, high = scene.start_time, scene.end_time
-    if shot is not None and shot.end_time - shot.start_time >= duration:
-        low, high = shot.start_time, shot.end_time
-
-    start = anchor - duration / 2
-    start = max(low, min(start, high - duration))
-    # a scene shorter than the slot runs on into what follows it in the episode
     source_end = source.duration_seconds or scene.end_time
-    start = max(0.0, min(start, source_end - duration))
+    latest_start = max(0.0, source_end - duration)
+    shots = db.execute(
+        select(Shot.start_time, Shot.end_time).where(
+            Shot.source_id == scene.source_id,
+            Shot.end_time > anchor - duration,
+            Shot.start_time < anchor + duration,
+        )
+    ).all()
+    cuts = sorted({t for shot in shots for t in shot})
+
+    # the moment itself must not sit right at the edge of the clip
+    margin = min(MIN_FRAGMENT_SECONDS, duration / 4)
+    earliest = max(0.0, anchor - duration + margin)
+    latest = min(latest_start, anchor - margin)
+    if latest < earliest:  # clip longer than the source allows around this moment
+        start = max(0.0, min(anchor - duration / 2, latest_start))
+        return round(start, 3), round(start + duration, 3)
+
+    options = {min(max(anchor - duration / 2, earliest), latest)}
+    options.update(c for c in cuts if earliest <= c <= latest)  # start on a cut
+    options.update(c - duration for c in cuts if earliest <= c - duration <= latest)  # end on a cut
+
+    def badness(start: float) -> tuple:
+        pieces = shot_fragments(cuts, start, start + duration)
+        slivers = sum(1 for piece in pieces if piece < MIN_FRAGMENT_SECONDS)
+        outside = max(0.0, scene.start_time - start) + max(0.0, start + duration - scene.end_time)
+        off_centre = abs(start + duration / 2 - anchor)
+        return slivers, len(pieces), round(outside, 2), off_centre
+
+    start = min(options, key=badness)
     return round(start, 3), round(start + duration, 3)
 
 
@@ -171,6 +266,7 @@ def search_slot(ctx: SearchContext, slot: Slot) -> list[Candidate]:
                 scene_end=scene.end_time,
                 clip_start=clip_start,
                 clip_end=clip_end,
+                slivers=count_slivers(db, source.id, clip_start, clip_end),
                 description=scene.context_description,
                 text_score=round(text_score, 2) if text_score is not None else None,
                 visual_score=round(visual_score, 2) if visual_score is not None else None,
@@ -199,7 +295,7 @@ class Usage:
             source_id == candidate.source_id and abs(start - candidate.clip_start) < NEIGHBOUR_SECONDS
             for source_id, start in self.clips
         )
-        return candidate.score - (NEIGHBOUR_PENALTY if near else 0.0)
+        return candidate.score - (NEIGHBOUR_PENALTY if near else 0.0) - SLIVER_PENALTY * candidate.slivers
 
 
 def choose(slot: Slot, ranked: list[Candidate], usage: Usage) -> None:

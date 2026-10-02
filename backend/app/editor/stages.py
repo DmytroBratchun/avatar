@@ -6,7 +6,7 @@ import re
 from collections.abc import Callable
 
 from app.editor import store
-from app.editor.footage import MAX_CLIP_SECONDS, SearchContext, Usage, choose, search_slot
+from app.editor.footage import SearchContext, Usage, choose, end_on_a_cut, search_slot
 from app.editor.llm import run_claude_json
 from app.editor.quotes import resolve_placement
 from app.editor.render import render_project
@@ -294,8 +294,12 @@ QUERIES_SCHEMA = {
 }
 
 
-def _make_slots(beat: Beat) -> list[Slot]:
-    count = max(1, math.ceil((beat.end - beat.start) / MAX_CLIP_SECONDS - 1e-6))
+def _slot_count(beat: Beat, max_clip_seconds: float) -> int:
+    return max(1, math.ceil((beat.end - beat.start) / max_clip_seconds - 1e-6))
+
+
+def _make_slots(beat: Beat, max_clip_seconds: float) -> list[Slot]:
+    count = _slot_count(beat, max_clip_seconds)
     length = (beat.end - beat.start) / count
     return [
         Slot(start=round(beat.start + i * length, 3), end=round(beat.start + (i + 1) * length, 3))
@@ -311,9 +315,13 @@ def run_queries(project_id: str, report: Report) -> None:
         raise RuntimeError("Build beats first")
 
     beats = project.beats
+    limit = project.settings.max_clip_seconds
     for beat in beats:
-        if not beat.slots:
-            beat.slots = _make_slots(beat)
+        # (Re)build the clips of a beat when it has none, or when the clip length
+        # limit changed since they were made - unless the user has locked one.
+        stale = len(beat.slots) != _slot_count(beat, limit) and not any(slot.locked for slot in beat.slots)
+        if not beat.slots or stale:
+            beat.slots = _make_slots(beat, limit)
 
     from app.db.models import Source
     from app.db.session import SessionLocal
@@ -400,11 +408,28 @@ def run_select(project_id: str, report: Report) -> None:
         for slot in slots:
             if slot.locked and slot.selected is not None:
                 usage.add(slot.candidates[slot.selected])
-        for n, slot in enumerate(slots):
-            if slot.locked and slot.selected is not None:
-                continue
-            choose(slot, search_slot(ctx, slot), usage)
-            report(f"finding footage {n + 1}/{len(slots)}")
+        n = 0
+        for beat in project.beats:
+            # Start every run from the even split, so boundaries moved by an earlier
+            # run don't drift further - unless the user has locked a clip in this beat,
+            # whose length then has to stay as it is.
+            limit = project.settings.max_clip_seconds
+            # the number of clips is decided when shot queries are written; if the
+            # limit changed since, leave the beat as it is until they are re-run
+            flexible = not any(slot.locked for slot in beat.slots) and len(beat.slots) == _slot_count(beat, limit)
+            if flexible and beat.slots:
+                even = _make_slots(beat, limit)
+                for slot, fresh in zip(beat.slots, even):
+                    slot.start, slot.end = fresh.start, fresh.end
+            for i, slot in enumerate(beat.slots):
+                n += 1
+                if slot.locked and slot.selected is not None:
+                    continue
+                choose(slot, search_slot(ctx, slot), usage)
+                # let this clip end on a cut by trading a little time with the next one
+                if flexible and i + 1 < len(beat.slots):
+                    end_on_a_cut(db, slot, beat.slots[i + 1], limit)
+                report(f"finding footage {n}/{len(slots)}")
     finally:
         db.close()
 

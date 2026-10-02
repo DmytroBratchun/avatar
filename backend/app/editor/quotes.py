@@ -209,7 +209,8 @@ def _read_episodes(
             blocks.append(
                 f"=== Episode [{source_id}] {_episode_label(episodes[source_id], universe)}\n"
                 + "\n".join(
-                    f"L{line.id} [{int(line.start_time // 60)}:{int(line.start_time % 60):02d}] {line.text.strip()}"
+                    f"L{line.id} [{int(line.start_time // 60)}:{int(line.start_time % 60):02d}] "
+                    + (f"{line.speaker}: " if line.speaker else "") + line.text.strip()
                     for line in lines
                 )
             )
@@ -224,10 +225,12 @@ def _read_episodes(
         prompt = (
             "An editor wants to drop short clips of dialogue from a show into a video essay. Below are the "
             "lines they are looking for, and the full transcripts of the episodes where each is expected. The "
-            "transcripts come from speech recognition: they have no speaker names and may contain errors.\n\n"
+            "transcripts come from speech recognition and may contain errors. A name before a line is who says "
+            "it (taken from a fan transcript; not every line has one).\n\n"
             "For each request, find the line or the few consecutive lines that make the best quote - a complete "
             "thought that stands on its own, ideally 3 to 15 seconds - and give the line ids. Start and end "
-            "the quote on whole sentences. Work out who is speaking from the conversation around it. If the "
+            "the quote on whole sentences. Where a line has no name, work out who is speaking from the "
+            "conversation around it. If the "
             "line is not in the transcripts given, or nothing there is worth quoting, leave that request out; "
             "a weak quote is worse than none. Lines must be consecutive and from one episode.\n\n"
             f"{asks}\n\n" + "\n\n".join(blocks)
@@ -237,6 +240,26 @@ def _read_episodes(
         cost += batch_cost or 0.0
         picks.extend(result["quotes"])
     return picks, offered, cost
+
+
+def text_between(source_id: int, start: float, end: float) -> str:
+    """The transcript of an episode between two times - the lines whose middle falls
+    inside the range - for showing what a re-cut quote now says."""
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        lines = db.execute(
+            select(TranscriptLine).where(
+                TranscriptLine.source_id == source_id,
+                TranscriptLine.end_time > start,
+                TranscriptLine.start_time < end,
+            ).order_by(TranscriptLine.start_time)
+        ).scalars()
+        kept = [line.text.strip() for line in lines if start <= (line.start_time + min(line.end_time, line.start_time + 6)) / 2 <= end]
+    finally:
+        db.close()
+    return " ".join(kept)
 
 
 def _tokens(text: str) -> list[str]:

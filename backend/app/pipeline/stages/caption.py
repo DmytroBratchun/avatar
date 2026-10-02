@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -383,6 +384,18 @@ def caption_scene(
     return caption_scene_via_api(source, scene, transcript_text, tag_hint, schema)
 
 
+def _tag_list(value) -> list[str]:
+    """Tags as a clean list of strings, whatever the model sent. Once in a while a
+    model returns a list as a broken string; stored as-is, that one scene makes
+    every listing that includes it fail validation."""
+    if isinstance(value, str):
+        value = [part for part in re.split(r"[\[\],]", value)]
+    if not isinstance(value, list):
+        return []
+    cleaned = [str(item).strip().strip("\"'").strip() for item in value]
+    return [item for item in cleaned if item]
+
+
 def run_captioning(db: Session, source: Source) -> None:
     scenes = list(
         db.execute(
@@ -415,7 +428,7 @@ def run_captioning(db: Session, source: Source) -> None:
                 select(TranscriptLine).where(TranscriptLine.id.in_(scene.linked_transcript_ids or []))
             ).scalars()
         )
-        transcript_text = "\n".join(line.text for line in lines)
+        transcript_text = "\n".join((f"{line.speaker}: " if line.speaker else "") + line.text for line in lines)
 
         # the claude CLI occasionally fails transiently (rate limit/server hiccup) when
         # fired off in a long rapid sequence - a couple of retries with backoff clears
@@ -426,10 +439,10 @@ def run_captioning(db: Session, source: Source) -> None:
                 result, cost = caption_scene(source, scene, transcript_text, tag_hint, caption_schema)
                 scene.visual_description = result["visual_description"]
                 scene.context_description = result["context_description"]
-                scene.character_tags = result["character_tags"]
+                scene.character_tags = _tag_list(result["character_tags"])
                 # the local model's schema still uses the older field names
-                scene.location_tags = result.get("place_tags", result.get("location_tags", []))
-                scene.mood_action_tags = result.get("mood_action_tags", [])
+                scene.location_tags = _tag_list(result.get("place_tags", result.get("location_tags", [])))
+                scene.mood_action_tags = _tag_list(result.get("mood_action_tags", []))
                 scene.region = result.get("region")
                 scene.caption_status = "done"
                 scene.caption_error = None

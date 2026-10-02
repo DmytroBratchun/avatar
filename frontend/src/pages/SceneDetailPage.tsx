@@ -127,6 +127,7 @@ export default function SceneDetailPage() {
                 <button type="button" className="ts ts-seek" title="Play from here" onClick={() => seek(line.start_time)}>
                   {formatTime(line.start_time)}
                 </button>
+                {line.speaker && <strong style={{ marginRight: "0.35rem" }}>{line.speaker}:</strong>}
                 {line.text}
               </div>
             ))}

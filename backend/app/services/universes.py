@@ -35,6 +35,9 @@ class Universe(BaseModel):
     region_notes: str = ""
     # region -> what its scenery looks like, for choosing video backgrounds
     scenery: dict[str, str] = Field(default_factory=dict)
+    # MediaWiki API of a fan wiki with a "Transcript" namespace: episode transcripts
+    # with speaker names and descriptions (see services/wiki_transcripts.py)
+    transcripts_wiki: str | None = None
 
 
 DEFAULT_UNIVERSES = [
@@ -52,6 +55,7 @@ DEFAULT_UNIVERSES = [
             "The Legend of Aang: The Last Airbender (2026 film)",
         ],
         season_word="Book",
+        transcripts_wiki="https://avatar.fandom.com/api.php",
         regions=[
             "Southern Water Tribe",
             "Northern Water Tribe",

@@ -247,6 +247,13 @@ a {
   align-items: start;
 }
 
+/* a group of look settings; the one the preview is showing has an accent edge */
+.look-section {
+  margin-top: 0.75rem;
+  padding: 0.6rem 0 0.6rem 0.75rem;
+  border-left: 3px solid var(--border);
+}
+
 .look-preview {
   position: sticky;
   top: 56px;
@@ -262,33 +269,20 @@ a {
   }
 }
 
-/* stage progress bar */
-.progress {
-  height: 4px;
-  margin-top: 0.35rem;
-  border-radius: 2px;
-  background: var(--bg-hover);
-  overflow: hidden;
+/* small spinning ring shown while a stage is working */
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--bg-hover);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spinner-turn 0.8s linear infinite;
 }
 
-.progress > div {
-  height: 100%;
-  border-radius: 2px;
-  background: var(--accent);
-  transition: width 0.4s;
-}
-
-/* no count to show (waiting on an LLM call): a bar that slides back and forth */
-.progress.indeterminate > div {
-  animation: progress-slide 1.4s ease-in-out infinite alternate;
-}
-
-@keyframes progress-slide {
-  from {
-    margin-left: 0;
-  }
+@keyframes spinner-turn {
   to {
-    margin-left: 70%;
+    transform: rotate(360deg);
   }
 }
 
