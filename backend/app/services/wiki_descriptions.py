@@ -57,8 +57,10 @@ def description_ranges(entries: list[WikiEntry]) -> list[tuple[float, float, str
 
 
 def scene_texts(db: Session, source_id: int) -> dict[int, str]:
-    """scene id -> the wiki's account of that scene. Scenes the wiki says nothing
-    about are left out."""
+    """scene id -> the wiki's account of that scene. Scenes with no description of
+    what happens are left out, even when the wiki has their dialogue: a bare line
+    ("Zuko: I have changed.") says nothing about what is on screen, and in the index
+    it only crowds out scenes that are described."""
     entries = list(
         db.execute(select(WikiEntry).where(WikiEntry.source_id == source_id).order_by(WikiEntry.position)).scalars()
     )
@@ -85,7 +87,6 @@ def scene_texts(db: Session, source_id: int) -> dict[int, str]:
 
     texts: dict[int, str] = {}
     for scene in scenes:
-        parts = seen.get(scene.id, []) + said.get(scene.id, [])
-        if parts:
-            texts[scene.id] = "\n".join(parts)[:MAX_CHARS]
+        if scene.id in seen:
+            texts[scene.id] = "\n".join(seen[scene.id] + said.get(scene.id, []))[:MAX_CHARS]
     return texts

@@ -183,3 +183,20 @@ class SceneShot(Base):
     shot_order: Mapped[int] = mapped_column(Integer, nullable=False)
 
     scene: Mapped[Scene] = relationship(back_populates="scene_shots")
+
+
+class BankQuote(Base):
+    """A notable quote from a curated collection (see services/quote_bank.py), located
+    in an episode: ready to be dropped into a video with its own sound."""
+
+    __tablename__ = "quote_bank"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_id: Mapped[int] = mapped_column(ForeignKey("sources.id", ondelete="CASCADE"), index=True)
+    start_time: Mapped[float] = mapped_column(Float, nullable=False)
+    end_time: Mapped[float] = mapped_column(Float, nullable=False)
+    # the lines as collected, "Speaker: text" one per line
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    speakers: Mapped[str] = mapped_column(String, nullable=False, default="")  # comma-separated
+    origin: Mapped[str] = mapped_column(String, nullable=False)
+    match_score: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)

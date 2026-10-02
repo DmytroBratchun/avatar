@@ -254,6 +254,20 @@ export interface EditorBeat {
   summary: string;
 }
 
+/** A notable quote from a curated collection, located in an episode. */
+export interface BankQuote {
+  id: number;
+  source_id: number;
+  show_title: string | null;
+  book: number | null;
+  episode_number: number | null;
+  start_time: number;
+  end_time: number;
+  text: string;
+  speakers: string;
+  origin: string;
+}
+
 export interface EditorQuote {
   id: string;
   status: "proposed" | "approved" | "rejected";
@@ -438,6 +452,13 @@ export const api = {
   saveEditorDefaultLook: (id: string) =>
     request<EditorProject["settings"]>(`/api/editor/projects/${id}/save-default-look`, { method: "POST" }),
   listUniverses: () => request<UniverseOut[]>("/api/universes"),
+  listBankQuotes: (params: { q?: string; speaker?: string; shows?: string[] }) => {
+    const search = new URLSearchParams();
+    if (params.q) search.set("q", params.q);
+    if (params.speaker) search.set("speaker", params.speaker);
+    (params.shows ?? []).forEach((show) => search.append("shows", show));
+    return request<{ total: number; speakers: string[]; quotes: BankQuote[] }>(`/api/quote-bank?${search}`);
+  },
   createEditorProject: (payload: { title: string; universe: string; script_text?: string; shows: string[]; layout?: string }) =>
     request<EditorProject>("/api/editor/projects", { method: "POST", body: JSON.stringify(payload) }),
   updateEditorProject: (

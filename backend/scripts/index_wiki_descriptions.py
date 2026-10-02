@@ -45,6 +45,7 @@ def main() -> None:
 
         has_vector = {row[0] for row in db.execute(text("SELECT scene_id FROM scene_wiki_vec")).all()}
         todo: list[tuple[Scene, str]] = []
+        stale: list[Scene] = []  # had a text before, get none now
         total_scenes = with_text = 0
         for source in sources:
             texts = scene_texts(db, source.id)
@@ -55,9 +56,18 @@ def main() -> None:
                 new_text = texts.get(scene.id)
                 if new_text and (scene.wiki_description != new_text or scene.id not in has_vector):
                     todo.append((scene, new_text))
-        print(f"{len(sources)} episodes, {total_scenes} scenes; {with_text} get a wiki text ({with_text / max(total_scenes, 1):.0%}); {len(todo)} to embed")
+                elif not new_text and (scene.wiki_description or scene.id in has_vector):
+                    stale.append(scene)
+        print(f"{len(sources)} episodes, {total_scenes} scenes; {with_text} get a wiki text ({with_text / max(total_scenes, 1):.0%}); {len(todo)} to embed, {len(stale)} to remove from the index")
         if not args.apply:
             print("Preview only - nothing was changed. Run again with --apply.")
+            return
+
+        for scene in stale:
+            scene.wiki_description = None
+            db.execute(text("DELETE FROM scene_wiki_vec WHERE scene_id = :id"), {"id": scene.id})
+        db.commit()
+        if not todo:
             return
 
         from app.services.embeddings import _text_model

@@ -4,6 +4,7 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import type { EditorBeat, EditorJob, EditorProject, EditorStage, LookFormat } from "../api/client";
 import LookPreview from "../components/LookPreview";
+import QuoteBankCard from "../components/QuoteBankCard";
 import QuotesCard, { AddQuoteCard } from "../components/QuotesCard";
 import RenderSettingsCard from "../components/RenderSettingsCard";
 import { SlotEditor, SlotThumb } from "../components/SlotEditor";
@@ -496,6 +497,7 @@ export default function EditorProjectPage() {
             </button>
             {project.word_count === 0 && <span className="hint"> Transcribe the narration first.</span>}
           </div>)}
+          <QuoteBankCard project={project} shows={availableShows} disabled={busy} onChange={setProject} />
           <AddQuoteCard project={project} shows={availableShows} disabled={busy} onChange={setProject} />
         </>
       )}

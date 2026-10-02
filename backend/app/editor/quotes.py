@@ -5,10 +5,11 @@ A quote is its own stretch of the final video: the clip plays with its original
 sound between two pieces of narration, pushing everything after it later. Quotes
 are only proposed here - nothing enters the video until the user approves it.
 
-Flow: Claude reads the narration and the list of episodes and says what line it
-would want, after which sentence, and in which episodes it expects to find it ->
-Claude reads the full transcripts of those episodes and picks exact lines, or
-nothing -> the fragment is re-transcribed with word timestamps to find where the
+Flow: Claude reads the narration, the quote bank (notable quotes already located in
+the episodes, see services/quote_bank.py) and the list of episodes, and for each
+place a quote would help either picks one from the bank or says what line it would
+want and in which episodes it expects to find it -> for the latter, Claude reads the
+full transcripts of those episodes and picks exact lines, or nothing -> the fragment is re-transcribed with word timestamps to find where the
 words really start and stop, because the index only has line-level timings.
 
 There is no vector search here on purpose. A whole episode's transcript is only a
@@ -26,7 +27,7 @@ from pathlib import Path
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Source, TranscriptLine
+from app.db.models import BankQuote, Source, TranscriptLine
 from app.editor.llm import run_claude_json
 from app.editor.store import Project, Quote, Word, project_shows, project_universe
 
@@ -38,6 +39,7 @@ QUOTE_MODEL = "opus"
 # transcripts are read in batches of episodes, at most about this many characters per call
 BATCH_CHARS = 60_000
 MAX_QUOTE_SECONDS = 40.0
+BANK_LINE_CHARS = 320  # how much of a banked quote is shown to the model
 FRAGMENT_PADDING = 2.0  # seconds of audio either side of the lines, re-transcribed to find the exact words
 LEAD_IN, LEAD_OUT = 0.2, 0.3  # breathing room kept around the spoken words
 SENTENCE_END = (".", "!", "?", "…", '."', '!"', '?"')
@@ -51,6 +53,13 @@ WANTED_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "after_sentence": {"type": "integer", "description": "The quote plays right after this sentence."},
+                    "bank_quote": {
+                        "type": "integer",
+                        "description": (
+                            "Number (after Q) of a quote from the quote bank, when one of them is the line you "
+                            "want. Then leave episodes empty. Omit when the line is not in the bank."
+                        ),
+                    },
                     "query": {
                         "type": "string",
                         "description": (
@@ -138,10 +147,17 @@ def _episode_label(source: Source, universe) -> str:
     return ", ".join(p for p in parts if p) + f" - {_clean_title(source)}"
 
 
+def _bank(db: Session, episodes: dict[int, Source]) -> dict[int, BankQuote]:
+    """Banked quotes from the project's episodes that are short enough to use whole."""
+    rows = db.execute(select(BankQuote).where(BankQuote.source_id.in_(list(episodes))).order_by(BankQuote.id)).scalars()
+    return {quote.id: quote for quote in rows if quote.end_time - quote.start_time <= MAX_QUOTE_SECONDS}
+
+
 def _wanted(
-    project: Project, words: list[Word], ends: list[int], episodes: list[Source], cwd: Path
+    project: Project, words: list[Word], ends: list[int], episodes: list[Source], bank: dict[int, BankQuote], cwd: Path
 ) -> tuple[list[dict], float]:
-    """What quotes the narration could use, where, and which episodes to look in."""
+    """What quotes the narration could use and where: one from the bank, or a line
+    to look for and the episodes to look in."""
     starts = [0] + [e + 1 for e in ends[:-1]]
     sentences = [" ".join(w.text for w in words[s : e + 1]) for s, e in zip(starts, ends)]
     universe = project_universe(project)
@@ -156,8 +172,25 @@ def _wanted(
         "episodes to look for it in. Only suggest lines that are really spoken in the show; the transcripts "
         "of the episodes you name will be read to find them, so be specific about the wording and the scene. "
         "Don't pick lines that just repeat what the narrator said.\n\n"
-        "Narration:\n" + "\n".join(f"[{i}] {s}" for i, s in enumerate(sentences))
+        + (
+            "A quote bank is given below: well-known quotes that have already been found in the episodes. "
+            "When the line you want is there, give its number as bank_quote - it is used as written, with no "
+            "search, so prefer the bank when it has a line that fits as well as anything you can recall. When "
+            "nothing in the bank fits, describe the line and name the episodes as usual.\n\n"
+            if bank
+            else ""
+        )
+        + "Narration:\n" + "\n".join(f"[{i}] {s}" for i, s in enumerate(sentences))
         + "\n\nEpisodes available (give the number in brackets):\n" + listing
+        + (
+            "\n\nQuote bank (the episode number in brackets, then the lines):\n"
+            + "\n".join(
+                f"Q{quote.id} [{quote.source_id}] " + " / ".join(quote.text.split("\n"))[:BANK_LINE_CHARS]
+                for quote in bank.values()
+            )
+            if bank
+            else ""
+        )
     )
     result, cost = run_claude_json(prompt, WANTED_SCHEMA, cwd=cwd, timeout=600, model=QUOTE_MODEL)
     known = {source.id for source in episodes}
@@ -166,7 +199,9 @@ def _wanted(
         if not 0 <= int(quote["after_sentence"]) < len(ends):
             continue
         quote["episodes"] = [int(e) for e in quote.get("episodes", []) if int(e) in known][:EPISODES_PER_QUOTE]
-        if quote["episodes"]:
+        if quote.get("bank_quote") is not None and int(quote["bank_quote"]) not in bank:
+            quote["bank_quote"] = None  # no such number: fall back to looking for it
+        if quote.get("bank_quote") is not None or quote["episodes"]:
             wanted.append(quote)
     return wanted, cost or 0.0
 
@@ -314,19 +349,59 @@ def find_quotes(db: Session, project: Project, words: list[Word], cwd: Path, rep
         raise RuntimeError("None of this project's shows has a transcript yet")
 
     report("looking for places a quote would help")
-    wanted, cost = _wanted(project, words, ends, list(episodes.values()), cwd)
+    bank = _bank(db, episodes)
+    wanted, cost = _wanted(project, words, ends, list(episodes.values()), bank, cwd)
 
     kept = [q for q in project.quotes if q.status == "approved"]
     project.quotes = kept
     if not wanted:
         return cost
 
-    picks, offered, read_cost = _read_episodes(db, wanted, episodes, universe, cwd, report)
-    cost += read_cost
-    answered: set[int] = set()
-
     cache_dir = cwd / "cache"
     cache_dir.mkdir(exist_ok=True)
+
+    def add(request: int, source: Source, start: float, end: float, text: str, speaker: str, reason: str) -> None:
+        clip_start, clip_end = _exact_span(source.file_path, start, end, text, cache_dir)
+        after_word, at, before = resolve_placement(project, words, ends[int(wanted[request]["after_sentence"])])
+        project.quotes.append(
+            Quote(
+                id=f"quote_{uuid.uuid4().hex[:8]}",
+                after_word=after_word,
+                at=at,
+                after_text=before,
+                source_id=source.id,
+                file_path=source.file_path,
+                show_title=source.show_title,
+                book=source.book,
+                episode_number=source.episode_number,
+                clip_start=round(clip_start, 3),
+                clip_end=round(clip_end, 3),
+                text=text,
+                speaker=speaker,
+                reason=reason,
+            )
+        )
+
+    # quotes taken from the bank are already located - no episodes to read
+    answered: set[int] = set()
+    for request, want in enumerate(wanted):
+        if want.get("bank_quote") is None:
+            continue
+        banked = bank[int(want["bank_quote"])]
+        if any(q.source_id == banked.source_id and q.clip_start < banked.end_time and q.clip_end > banked.start_time for q in project.quotes):
+            answered.add(request)
+            continue
+        report(f"cutting a quote from the bank ({len(answered) + 1})")
+        # the wording without the "Speaker:" prefixes, to find the exact words in the audio
+        spoken = " ".join(line.split(": ", 1)[-1] for line in banked.text.split("\n"))
+        add(request, episodes[banked.source_id], banked.start_time, banked.end_time, spoken, banked.speakers, f"From the quote bank. {want['query']}".strip())
+        answered.add(request)
+
+    wanted_search = [want if n not in answered and want["episodes"] else {**want, "episodes": []} for n, want in enumerate(wanted)]
+    picks, offered = [], {}
+    if any(want["episodes"] for want in wanted_search):
+        picks, offered, read_cost = _read_episodes(db, wanted_search, episodes, universe, cwd, report)
+        cost += read_cost
     for n, pick in enumerate(picks):
         request = int(pick["request"])
         # one quote per request: its episodes may have been read in separate batches
@@ -350,26 +425,6 @@ def find_quotes(db: Session, project: Project, words: list[Word], cwd: Path, rep
 
         answered.add(request)
         report(f"cutting quote {n + 1}/{len(picks)}")
-        text = " ".join(line.text.strip() for line in lines)
-        clip_start, clip_end = _exact_span(source.file_path, start, end, text, cache_dir)
-        after_word, at, before = resolve_placement(project, words, ends[int(wanted[request]["after_sentence"])])
-        project.quotes.append(
-            Quote(
-                id=f"quote_{uuid.uuid4().hex[:8]}",
-                after_word=after_word,
-                at=at,
-                after_text=before,
-                source_id=source.id,
-                file_path=source.file_path,
-                show_title=source.show_title,
-                book=source.book,
-                episode_number=source.episode_number,
-                clip_start=round(clip_start, 3),
-                clip_end=round(clip_end, 3),
-                text=text,
-                speaker=pick["speaker"],
-                reason=pick["reason"],
-            )
-        )
+        add(request, source, start, end, " ".join(line.text.strip() for line in lines), pick["speaker"], pick["reason"])
     project.quotes.sort(key=lambda q: q.at)
     return cost

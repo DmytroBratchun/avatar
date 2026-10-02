@@ -38,6 +38,9 @@ class Universe(BaseModel):
     # MediaWiki API of a fan wiki with a "Transcript" namespace: episode transcripts
     # with speaker names and descriptions (see services/wiki_transcripts.py)
     transcripts_wiki: str | None = None
+    # curated quote collections: a Wikiquote api.php and the pages to read from it
+    quotes_wiki: str | None = None
+    quote_pages: list[str] = []
 
 
 DEFAULT_UNIVERSES = [
@@ -56,6 +59,8 @@ DEFAULT_UNIVERSES = [
         ],
         season_word="Book",
         transcripts_wiki="https://avatar.fandom.com/api.php",
+        quotes_wiki="https://en.wikiquote.org/w/api.php",
+        quote_pages=["Avatar: The Last Airbender (season 1)", "Avatar: The Last Airbender (season 2)", "Avatar: The Last Airbender (season 3)", "The Legend of Korra (season 1)", "The Legend of Korra (season 2)", "The Legend of Korra (season 3)", "The Legend of Korra (season 4)"],
         regions=[
             "Southern Water Tribe",
             "Northern Water Tribe",

@@ -3,7 +3,7 @@ import threading
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import admin, editor, logs, media, universes as universes_api, scenes, search, settings as settings_api, sources, transcript, transcript_chunks, worker as worker_api
+from app.api import admin, editor, logs, media, quote_bank as quote_bank_api, universes as universes_api, scenes, search, settings as settings_api, sources, transcript, transcript_chunks, worker as worker_api
 from app.db.session import init_db
 from app.pipeline.local_worker import run_loop as run_local_worker_loop
 from app.services.runtime_settings import get_effective_settings
@@ -32,6 +32,7 @@ app.include_router(admin.router)
 app.include_router(editor.router)
 app.include_router(logs.router)
 app.include_router(universes_api.router)
+app.include_router(quote_bank_api.router)
 
 
 _local_worker_stop = threading.Event()
