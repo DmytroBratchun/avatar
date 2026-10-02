@@ -37,7 +37,7 @@ function ChunkCard({ result, filePath }: { result: TranscriptChunkSearchResult; 
         title="Click for more context and overlapping scenes"
       >
         {expanded ? "▾" : "▸"} {chunk.show_title} · Book {chunk.book} · Ep {chunk.episode_number} ·{" "}
-        {formatTime(chunk.start_time)}–{formatTime(chunk.end_time)}
+        {formatTime(chunk.start_time)}–{formatTime(chunk.end_time)} · {(chunk.end_time - chunk.start_time).toFixed(0)}s
       </div>
       <p style={{ margin: "0.4rem 0" }}>{chunk.raw_text}</p>
       {result.episode_summary && (

@@ -130,9 +130,23 @@ export interface TranscriptLineOut {
   speaker: string | null;
 }
 
+export interface SceneTechnicalOut {
+  shots: { shot_index: number; start_time: number; end_time: number }[];
+  keyframe_times: number[];
+  previous_scene_id: number | null;
+  next_scene_id: number | null;
+  end_reason: string;
+  dialogue_gap_after: number | null;
+  caption_attempts: number;
+  caption_error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
 export interface SceneDetailOut extends SceneOut {
   transcript_lines: TranscriptLineOut[];
   source_file_path: string | null;
+  technical: SceneTechnicalOut;
 }
 
 export interface SearchResult {
@@ -261,6 +275,7 @@ export interface EditorJob {
   stage: string;
   status: "running" | "done" | "error";
   detail: string;
+  progress: number | null;
   error: string | null;
   started_at: string;
 }
@@ -298,6 +313,7 @@ export interface EditorProject {
   output_file: string | null;
   rendered_at: string | null;
   job: EditorJob | null;
+  queue: EditorStage[];
 }
 
 type QueryValue = string | number | string[] | undefined;
@@ -444,6 +460,8 @@ export const api = {
     }),
   runEditorStage: (id: string, stage: EditorStage) =>
     request<EditorProject>(`/api/editor/projects/${id}/run/${stage}`, { method: "POST" }),
+  unqueueEditorStage: (id: string, stage: EditorStage) =>
+    request<EditorProject>(`/api/editor/projects/${id}/queue/${stage}`, { method: "DELETE" }),
   updateEditorSlot: (id: string, beatId: string, slotIndex: number, payload: { selected?: number; locked?: boolean }) =>
     request<EditorProject>(`/api/editor/projects/${id}/beats/${beatId}/slots/${slotIndex}`, {
       method: "PATCH",

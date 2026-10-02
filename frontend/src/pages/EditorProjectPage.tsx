@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
-import type { EditorBeat, EditorProject, EditorStage } from "../api/client";
+import type { EditorBeat, EditorJob, EditorProject, EditorStage } from "../api/client";
 import LookPreview from "../components/LookPreview";
 import QuotesCard from "../components/QuotesCard";
 import RenderSettingsCard from "../components/RenderSettingsCard";
@@ -14,35 +14,88 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toFixed(1).padStart(4, "0")}`;
 }
 
+function elapsed(since: string, now: number): string {
+  const seconds = Math.max(0, Math.round((now - new Date(since).getTime()) / 1000));
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${(seconds % 60).toString().padStart(2, "0")}s`;
+}
+
 function StageRow({
   label,
   description,
   state,
-  action,
+  done,
+  job,
+  queuePosition,
+  canRun,
+  somethingRunning,
   onRun,
-  disabled,
+  onUnqueue,
 }: {
   label: string;
   description: string;
   state: string;
-  action: string;
+  done: boolean;
+  // this stage's job, when it is the one running or the one that last failed
+  job: EditorJob | null;
+  // 1-based place in the queue, or 0 when not queued
+  queuePosition: number;
+  canRun: boolean;
+  somethingRunning: boolean;
   onRun: () => void;
-  disabled: boolean;
+  onUnqueue: () => void;
 }) {
+  const running = job?.status === "running";
+  // re-render once a second while running, for the elapsed time
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [running]);
+
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", padding: "0.35rem 0" }}>
-      <div style={{ flex: 1 }}>
-        <strong style={{ fontSize: "0.9rem" }}>{label}</strong>
-        <span className="hint" style={{ margin: "0 0 0 0.5rem" }}>
-          {description}
+    <div style={{ padding: "0.4rem 0", borderTop: "1px solid var(--border)" }}>
+      {/* button first, then name and state right next to it - nothing to scan across */}
+      <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+        <div style={{ width: "4.5rem", flexShrink: 0 }}>
+          {queuePosition > 0 ? (
+            <button className="ghost small" style={{ width: "100%" }} onClick={onUnqueue} title="Remove from the queue">
+              × cancel
+            </button>
+          ) : (
+            <button className="small" style={{ width: "100%" }} onClick={onRun} disabled={running || !canRun}>
+              {somethingRunning ? "Queue" : done ? "Re-run" : "Run"}
+            </button>
+          )}
+        </div>
+        <strong style={{ fontSize: "0.9rem", width: "7.5rem", flexShrink: 0, cursor: "help" }} title={description}>
+          {label}
+        </strong>
+        <span className="hint" style={{ margin: 0 }}>
+          {running ? (
+            <>
+              <span className="badge accent">running</span> {job?.detail} · {elapsed(job?.started_at ?? "", now)}
+            </>
+          ) : queuePosition > 0 ? (
+            <span className="badge">queued #{queuePosition}</span>
+          ) : (
+            state
+          )}
         </span>
       </div>
-      <span className="hint" style={{ margin: 0 }}>
-        {state}
-      </span>
-      <button className="small" onClick={onRun} disabled={disabled}>
-        {action}
-      </button>
+      {running && (
+        <div
+          className={job?.progress == null ? "progress indeterminate" : "progress"}
+          title={job?.progress == null ? "Waiting for Claude - no progress to report" : `${Math.round((job.progress ?? 0) * 100)}%`}
+        >
+          <div style={{ width: job?.progress == null ? "30%" : `${Math.round(job.progress * 100)}%` }} />
+        </div>
+      )}
+      {job?.status === "error" && (
+        <p className="error-text" style={{ margin: "0.3rem 0 0" }}>
+          Failed: {job.error}
+        </p>
+      )}
     </div>
   );
 }
@@ -156,6 +209,10 @@ export default function EditorProjectPage() {
     mutationFn: (stage: EditorStage) => api.runEditorStage(id, stage),
     onSuccess: setProject,
   });
+  const unqueueMutation = useMutation({
+    mutationFn: (stage: EditorStage) => api.unqueueEditorStage(id, stage),
+    onSuccess: setProject,
+  });
   const uploadMutation = useMutation({
     mutationFn: (file: File) => api.uploadEditorAudio(id, file),
     onSuccess: setProject,
@@ -204,6 +261,68 @@ export default function EditorProjectPage() {
   const beatsWithBackground = project.beats.filter((b) => b.backgrounds.length > 0).length;
 
   const approvedQuotes = project.quotes.filter((q) => q.status === "approved").length;
+  const stages: { key: EditorStage; label: string; description: string; state: string; done: boolean; ready: boolean }[] = [
+    {
+      key: "transcribe",
+      label: "Transcribe",
+      description: "Word-level timings of the narration. Free, local.",
+      state: project.word_count > 0 ? `${project.word_count} words` : "not run",
+      done: project.word_count > 0,
+      ready: !!project.audio_file,
+    },
+    {
+      key: "quotes",
+      label: "Quotes",
+      description: "Proposes lines from the show to drop in, by reading the episodes. Several Claude calls; you choose which to use. Optional.",
+      state: project.quotes.length > 0 ? `${project.quotes.length} found` : "not run - optional",
+      done: project.quotes.length > 0,
+      ready: project.word_count > 0,
+    },
+    {
+      key: "beats",
+      label: "Beats",
+      description: "Groups the narration into visual ideas. One Claude call.",
+      state: project.beats.length > 0 ? `${project.beats.length} beats` : "not run",
+      done: project.beats.length > 0,
+      ready: project.word_count > 0,
+    },
+    {
+      key: "queries",
+      label: "Shot queries",
+      description: "Decides what footage each clip should show. One Claude call per 40 beats; keeps locked clips.",
+      state: slotsWithQueries > 0 ? `${slotsWithQueries} clips described` : "not run",
+      done: slotsWithQueries > 0,
+      ready: project.beats.length > 0,
+    },
+    {
+      key: "select",
+      label: "Find footage",
+      description: "Searches the index for every clip, avoiding repeats. Free, local; keeps locked clips.",
+      state: slotsFilled > 0 ? `${slotsFilled} / ${slots.length} clips filled` : "not run",
+      done: slotsFilled > 0,
+      ready: slotsWithQueries > 0,
+    },
+    ...(project.settings.layout === "framed"
+      ? [
+          {
+            key: "background" as const,
+            label: "Background",
+            description: "Calm scenery behind the frame, themed per beat, cross-fading. One Claude call, then local search.",
+            state: beatsWithBackground > 0 ? `${beatsWithBackground} / ${project.beats.length} beats` : "not run - uses a blurred copy of each clip",
+            done: beatsWithBackground > 0,
+            ready: project.beats.length > 0,
+          },
+        ]
+      : []),
+    {
+      key: "render",
+      label: "Render",
+      description: "Builds the video. Free, local; only clips that changed are re-encoded.",
+      state: project.rendered_at ? `rendered ${new Date(project.rendered_at).toLocaleTimeString()}` : "not run",
+      done: !!project.rendered_at,
+      ready: slotsFilled > 0,
+    },
+  ];
   const tabs: { key: Tab; label: string }[] = [
     { key: "pipeline", label: "Pipeline" },
     { key: "quotes", label: project.quotes.length > 0 ? `Quotes ${approvedQuotes}/${project.quotes.length}` : "Quotes" },
@@ -212,8 +331,12 @@ export default function EditorProjectPage() {
     { key: "video", label: "Video" },
   ];
   const renderButton = (
-    <button className="small primary" onClick={() => runMutation.mutate("render")} disabled={busy || slotsFilled === 0}>
-      {project.rendered_at ? "Re-render" : "Render"}
+    <button
+      className="small primary"
+      onClick={() => runMutation.mutate("render")}
+      disabled={project.job?.stage === "render" && running ? true : project.queue.includes("render") || (slotsFilled === 0 && !running)}
+    >
+      {project.queue.includes("render") ? "Render queued" : running ? "Queue render" : project.rendered_at ? "Re-render" : "Render"}
     </button>
   );
 
@@ -243,13 +366,16 @@ export default function EditorProjectPage() {
       </div>
 
       {/* what is running or went wrong is shown on every tab */}
-      {running && (
+      {tab !== "pipeline" && running && (
         <p style={{ margin: "0 0 0.75rem" }}>
           <span className="badge accent">{project.job?.stage} running</span>{" "}
-          <span className="hint">{project.job?.detail}</span>
+          <span className="hint">
+            {project.job?.detail}
+            {project.queue.length > 0 && ` · then ${project.queue.join(", ")}`}
+          </span>
         </p>
       )}
-      {project.job?.status === "error" && (
+      {tab !== "pipeline" && project.job?.status === "error" && (
         <p className="error-text" style={{ margin: "0 0 0.75rem" }}>
           {project.job.stage} failed: {project.job.error}
         </p>
@@ -286,64 +412,25 @@ export default function EditorProjectPage() {
 
           <div className="card" style={{ marginTop: "0.75rem" }}>
             <h3>Stages</h3>
-            <StageRow
-              label="Transcribe"
-              description="Word-level timings of the narration. Free, local."
-              state={project.word_count > 0 ? `${project.word_count} words` : "not run"}
-              action={project.word_count > 0 ? "Re-run" : "Run"}
-              onRun={() => runMutation.mutate("transcribe")}
-              disabled={busy || !project.audio_file}
-            />
-            <StageRow
-              label="Quotes"
-              description="Proposes lines from the show to drop in. Two Claude calls; you choose which to use."
-              state={project.quotes.length > 0 ? `${project.quotes.length} found` : "not run - optional"}
-              action={project.quotes.length > 0 ? "Search again" : "Run"}
-              onRun={() => runMutation.mutate("quotes")}
-              disabled={busy || project.word_count === 0}
-            />
-            <StageRow
-              label="Beats"
-              description="Groups the narration into visual ideas. One Claude call."
-              state={project.beats.length > 0 ? `${project.beats.length} beats` : "not run"}
-              action={project.beats.length > 0 ? "Re-run" : "Run"}
-              onRun={() => runMutation.mutate("beats")}
-              disabled={busy || project.word_count === 0}
-            />
-            <StageRow
-              label="Shot queries"
-              description="Decides what footage each clip should show. One Claude call; keeps locked clips."
-              state={slotsWithQueries > 0 ? `${slotsWithQueries} clips described` : "not run"}
-              action={slotsWithQueries > 0 ? "Re-run" : "Run"}
-              onRun={() => runMutation.mutate("queries")}
-              disabled={busy || project.beats.length === 0}
-            />
-            <StageRow
-              label="Find footage"
-              description="Searches the index for every clip, avoiding repeats. Free, local; keeps locked clips."
-              state={slotsFilled > 0 ? `${slotsFilled} / ${slots.length} clips filled` : "not run"}
-              action={slotsFilled > 0 ? "Re-run" : "Run"}
-              onRun={() => runMutation.mutate("select")}
-              disabled={busy || slotsWithQueries === 0}
-            />
-            {project.settings.layout === "framed" && (
+            <p className="hint" style={{ marginTop: 0 }}>
+              Hover a name to see what the stage does. Running a stage while another is working puts it in the queue.
+            </p>
+            {stages.map((stage) => (
               <StageRow
-                label="Background"
-                description="Calm scenery behind the frame, themed per beat, cross-fading. One Claude call, then local search."
-                state={beatsWithBackground > 0 ? `${beatsWithBackground} / ${project.beats.length} beats` : "not run - uses a blurred copy of each clip"}
-                action={beatsWithBackground > 0 ? "Re-run" : "Run"}
-                onRun={() => runMutation.mutate("background")}
-                disabled={busy || project.beats.length === 0}
+                key={stage.key}
+                label={stage.label}
+                description={stage.description}
+                state={stage.state}
+                done={stage.done}
+                job={project.job?.stage === stage.key ? project.job : null}
+                queuePosition={project.queue.indexOf(stage.key) + 1}
+                // when something is running or queued, what this stage needs may be on its way
+                canRun={!!project.audio_file && (stage.ready || running || project.queue.length > 0)}
+                somethingRunning={running}
+                onRun={() => runMutation.mutate(stage.key)}
+                onUnqueue={() => unqueueMutation.mutate(stage.key)}
               />
-            )}
-            <StageRow
-              label="Render"
-              description="Builds the video. Free, local; only clips that changed are re-encoded."
-              state={project.rendered_at ? `rendered ${new Date(project.rendered_at).toLocaleTimeString()}` : "not run"}
-              action={project.rendered_at ? "Re-render" : "Run"}
-              onRun={() => runMutation.mutate("render")}
-              disabled={busy || slotsFilled === 0}
-            />
+            ))}
           </div>
         </>
       )}

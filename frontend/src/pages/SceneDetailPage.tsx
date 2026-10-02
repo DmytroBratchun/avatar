@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client";
+import SceneTechnical from "../components/SceneTechnical";
 import TagMultiSelect from "../components/TagMultiSelect";
 
 function formatTime(seconds: number): string {
@@ -11,6 +12,15 @@ function formatTime(seconds: number): string {
 }
 
 export default function SceneDetailPage() {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  // jump the player to a moment in the episode and play from there
+  const seek = (time: number) => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.currentTime = time;
+    void video.play();
+    video.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  };
   const { id } = useParams();
   const sceneId = Number(id);
   const queryClient = useQueryClient();
@@ -61,13 +71,13 @@ export default function SceneDetailPage() {
       <h1>
         Book {scene.book} · Episode {scene.episode_number}
         <span style={{ color: "var(--text-tertiary)", fontWeight: 400, fontSize: "0.9rem", marginLeft: "0.6rem" }}>
-          {formatTime(scene.start_time)}–{formatTime(scene.end_time)}
+          {formatTime(scene.start_time)}–{formatTime(scene.end_time)} · {(scene.end_time - scene.start_time).toFixed(1)}s
         </span>
       </h1>
 
       <div className="scene-detail-layout" style={{ marginTop: "0.75rem" }}>
         <div>
-          <video controls src={`${api.streamUrl(scene.source_id)}#t=${scene.start_time}`} />
+          <video ref={videoRef} controls src={`${api.streamUrl(scene.source_id)}#t=${scene.start_time}`} />
           <div className="keyframes">
             {scene.keyframe_paths.map((_, i) => (
               <img key={i} src={api.keyframeUrl(scene.id, i)} alt="" />
@@ -114,7 +124,9 @@ export default function SceneDetailPage() {
             {scene.transcript_lines.length === 0 && <p style={{ margin: 0 }}>No dialogue in this scene.</p>}
             {scene.transcript_lines.map((line) => (
               <div className="transcript-line" key={line.id}>
-                <span className="ts">{formatTime(line.start_time)}</span>
+                <button type="button" className="ts ts-seek" title="Play from here" onClick={() => seek(line.start_time)}>
+                  {formatTime(line.start_time)}
+                </button>
                 {line.text}
               </div>
             ))}
@@ -150,6 +162,8 @@ export default function SceneDetailPage() {
               )}
             </p>
           </div>
+
+          <SceneTechnical scene={scene} onSeek={seek} />
         </div>
       </div>
     </div>

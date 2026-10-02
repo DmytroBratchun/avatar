@@ -3,10 +3,15 @@ import os
 import subprocess
 from pathlib import Path
 
+from app.services.runtime_settings import editor_llm_model
 
-def run_claude_json(prompt: str, schema: dict, cwd: Path, timeout: int = 300) -> tuple[dict, float | None]:
+
+def run_claude_json(
+    prompt: str, schema: dict, cwd: Path, timeout: int = 300, model: str | None = None
+) -> tuple[dict, float | None]:
     """One text-only headless Claude Code call returning schema-validated JSON,
-    billed to the Claude subscription like captioning. No --model: Claude Code picks.
+    billed to the Claude subscription like captioning. The model comes from
+    editor_llm_model() (Sonnet unless configured otherwise).
 
     The prompt goes over stdin, not argv - a whole narration transcript blows past
     Windows' ~32k command-line limit. cwd should be outside this repo so the call
@@ -14,9 +19,12 @@ def run_claude_json(prompt: str, schema: dict, cwd: Path, timeout: int = 300) ->
     env = os.environ.copy()
     env.pop("ANTHROPIC_API_KEY", None)
 
+    # a stage can ask for a specific model; otherwise the editor-wide setting applies
+    model = model or editor_llm_model()
     result = subprocess.run(
         [
             "claude", "-p",
+            *(["--model", model] if model else []),
             "--output-format", "json",
             "--json-schema", json.dumps(schema),
             "--tools", "",

@@ -49,13 +49,12 @@ function IndexBadgeRow({
 }
 
 function IndexBadge({ source }: { source: SourceOut }) {
-  if (source.scene_count === 0 && source.chunk_count === 0) return <span className="hint">—</span>;
+  if (source.scene_count === 0) return <span className="hint">—</span>;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem", fontFamily: "var(--font-mono)", fontSize: "0.78rem" }}>
       <IndexBadgeRow label="T" title="Text index" done={source.text_indexed_count} total={source.scene_count} />
       <IndexBadgeRow label="V" title="Visual index" done={source.visual_indexed_count} total={source.scene_count} />
-      <IndexBadgeRow label="C" title="Chunk index" done={source.chunk_indexed_count} total={source.chunk_count} />
     </div>
   );
 }
@@ -110,7 +109,6 @@ interface ColumnSettings {
   reindexTextBtn: boolean;
   reindexVisualBtn: boolean;
   summaryBtn: boolean;
-  chunksBtn: boolean;
   deleteBtn: boolean;
 }
 
@@ -124,7 +122,6 @@ const DEFAULT_COLUMN_SETTINGS: ColumnSettings = {
   reindexTextBtn: true,
   reindexVisualBtn: true,
   summaryBtn: true,
-  chunksBtn: true,
   deleteBtn: true,
 };
 
@@ -163,7 +160,6 @@ function TableSettingsMenu({ settings, onChange }: { settings: ColumnSettings; o
     ["reindexTextBtn", "Reindex text column"],
     ["reindexVisualBtn", "Reindex visual column"],
     ["summaryBtn", "Episode summary column"],
-    ["chunksBtn", "Transcript chunks column"],
     ["deleteBtn", "Delete button"],
   ];
 
@@ -258,16 +254,6 @@ function SourceRow({ source, columns }: { source: SourceOut; columns: ColumnSett
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sources"] }),
   });
 
-  const chunksMutation = useMutation({
-    mutationFn: () => api.reindexTranscriptChunks(source.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sources"] }),
-  });
-
-  const cancelChunksMutation = useMutation({
-    mutationFn: () => api.cancelTranscriptChunkReindex(source.id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["sources"] }),
-  });
-
   const middleColSpan =
     1 +
     (columns.status ? 1 : 0) +
@@ -276,8 +262,7 @@ function SourceRow({ source, columns }: { source: SourceOut; columns: ColumnSett
     (columns.cost ? 1 : 0) +
     (columns.reindexTextBtn ? 1 : 0) +
     (columns.reindexVisualBtn ? 1 : 0) +
-    (columns.summaryBtn ? 1 : 0) +
-    (columns.chunksBtn ? 1 : 0);
+    (columns.summaryBtn ? 1 : 0);
 
   if (editing) {
     return (
@@ -370,19 +355,6 @@ function SourceRow({ source, columns }: { source: SourceOut; columns: ColumnSett
             onCancel={() => cancelSummaryMutation.mutate()}
             pending={summaryMutation.isPending}
             cancelling={cancelSummaryMutation.isPending}
-          />
-        </td>
-      )}
-      {columns.chunksBtn && (
-        <td>
-          <ReindexCell
-            requested={source.transcript_chunk_reindex_requested}
-            total={source.chunk_count}
-            indexedCount={source.chunk_indexed_count}
-            onClick={() => chunksMutation.mutate()}
-            onCancel={() => cancelChunksMutation.mutate()}
-            pending={chunksMutation.isPending}
-            cancelling={cancelChunksMutation.isPending}
           />
         </td>
       )}
@@ -697,7 +669,6 @@ export default function LibraryPage() {
                     {columns.reindexTextBtn && <th>Reindex T</th>}
                     {columns.reindexVisualBtn && <th>Reindex V</th>}
                     {columns.summaryBtn && <th>Summary</th>}
-                    {columns.chunksBtn && <th>Chunks</th>}
                     {columns.cost && <th>Cost</th>}
                     <th></th>
                   </tr>

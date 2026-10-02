@@ -5,7 +5,10 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.db.models import Scene, Source, TranscriptChunk, TranscriptLine
+from app.config import settings as app_settings
+from app.db.models import SceneShot, Shot
 from app.db.session import get_db
+from app.pipeline.stages.extract_keyframes import _OFFSETS_BY_COUNT
 from app.schemas.scenes import FacetsOut, SceneDetailOut, SceneOut, SceneUpdateIn
 from app.services.embeddings import embed_text, text_embedding_model_id
 from app.vectorstore.sqlite_vec_client import upsert_text_vector
@@ -150,8 +153,61 @@ def get_scene(scene_id: int, db: Session = Depends(get_db)) -> SceneDetailOut:
             **SceneOut.model_validate(scene, from_attributes=True).model_dump(),
             "transcript_lines": lines,
             "source_file_path": scene.source.file_path,
+            "technical": _technical(db, scene),
         }
     )
+
+
+def _technical(db: Session, scene: Scene) -> dict:
+    shots = list(
+        db.execute(
+            select(Shot).join(SceneShot, SceneShot.shot_id == Shot.id)
+            .where(SceneShot.scene_id == scene.id).order_by(SceneShot.shot_order)
+        ).scalars()
+    )
+    duration = scene.end_time - scene.start_time
+    offsets = _OFFSETS_BY_COUNT.get(len(scene.keyframe_paths or []), [])
+    neighbours = db.execute(
+        select(Scene.id, Scene.start_time).where(Scene.source_id == scene.source_id).order_by(Scene.start_time)
+    ).all()
+    ids = [row[0] for row in neighbours]
+    position = ids.index(scene.id)
+    next_id = ids[position + 1] if position + 1 < len(ids) else None
+
+    # Re-derive why the grouping rules ended the scene here (see stages/group_scenes.py).
+    gap = None
+    if next_id is not None:
+        before = db.execute(
+            select(TranscriptLine.end_time).where(TranscriptLine.source_id == scene.source_id, TranscriptLine.end_time <= scene.end_time)
+            .order_by(TranscriptLine.end_time.desc()).limit(1)
+        ).scalar()
+        after = db.execute(
+            select(TranscriptLine.start_time).where(TranscriptLine.source_id == scene.source_id, TranscriptLine.start_time >= scene.end_time)
+            .order_by(TranscriptLine.start_time).limit(1)
+        ).scalar()
+        if before is not None and after is not None:
+            gap = round(after - before, 2)
+    if next_id is None:
+        reason = "end of the episode"
+    elif gap is not None and gap > app_settings.scene_gap_seconds:
+        reason = f"pause in dialogue longer than {app_settings.scene_gap_seconds:g}s"
+    elif duration >= app_settings.scene_max_duration_seconds * 0.8:
+        reason = f"length limit ({app_settings.scene_max_duration_seconds:g}s) - the next shot would have made it longer"
+    else:
+        reason = "no dialogue on one side of the cut"
+
+    return {
+        "shots": [{"shot_index": s.shot_index, "start_time": s.start_time, "end_time": s.end_time} for s in shots],
+        "keyframe_times": [round(scene.start_time + duration * o, 2) for o in offsets],
+        "previous_scene_id": ids[position - 1] if position > 0 else None,
+        "next_scene_id": next_id,
+        "end_reason": reason,
+        "dialogue_gap_after": gap,
+        "caption_attempts": scene.caption_attempts or 0,
+        "caption_error": scene.caption_error,
+        "created_at": scene.created_at.isoformat() if scene.created_at else None,
+        "updated_at": scene.updated_at.isoformat() if scene.updated_at else None,
+    }
 
 
 @router.patch("/{scene_id}", response_model=SceneOut)

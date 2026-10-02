@@ -148,6 +148,8 @@ class Job(BaseModel):
     stage: str
     status: str  # "running" | "done" | "error"
     detail: str = ""
+    # 0-1 when the stage reports counts ("12/151"); None when it can't say (an LLM call)
+    progress: float | None = None
     error: str | None = None
     started_at: str = ""
 
@@ -193,6 +195,8 @@ class Project(BaseModel):
     output_file: str | None = None  # relative to the project folder
     rendered_at: str | None = None
     job: Job | None = None
+    # stages waiting to run after the current one, in order
+    queue: list[str] = Field(default_factory=list)
 
 
 def now() -> str:

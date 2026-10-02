@@ -25,7 +25,6 @@ function buildTaskList(
     "Episode summary (paid, small)": [],
     "Text reindex (free)": [],
     "Visual reindex (free)": [],
-    "Transcript chunk reindex (free)": [],
   };
   for (const source of sources ?? []) {
     const label = `${source.show_title ?? ""} Book ${source.book ?? "?"} Ep ${source.episode_number ?? "?"}`;
@@ -75,20 +74,11 @@ function buildTaskList(
         detail: source.id === localCurrentId ? source.current_stage_detail : null,
       });
     }
-    if (source.transcript_chunk_reindex_requested) {
-      groups["Transcript chunk reindex (free)"].push({
-        source,
-        label,
-        kind: "chunks",
-        active: source.id === localCurrentId,
-        detail: source.id === localCurrentId ? source.current_stage_detail : null,
-      });
-    }
   }
   return groups;
 }
 
-const CANCELABLE_KINDS = new Set(["local", "captioning", "text", "visual", "summary", "chunks"]);
+const CANCELABLE_KINDS = new Set(["local", "captioning", "text", "visual", "summary"]);
 
 function TaskGroup({
   title,
@@ -250,8 +240,6 @@ export default function PipelinePage() {
           return api.cancelVisualReindex(t.source.id);
         case "summary":
           return api.cancelEpisodeSummary(t.source.id);
-        case "chunks":
-          return api.cancelTranscriptChunkReindex(t.source.id);
         default:
           return Promise.reject(new Error(`Cannot cancel task kind: ${t.kind}`));
       }
@@ -379,10 +367,10 @@ export default function PipelinePage() {
       </div>
 
       <div className="card" style={{ marginTop: "0.75rem" }}>
-        <h3>Transcript chunk RAG</h3>
+        <h3>Episode summaries</h3>
         <p className="hint">
-          ~60s overlapping windows over raw dialogue, embedded together with a per-episode summary for context.
-          Episode summary is a small text-only LLM call (Captioning worker); chunk embedding itself is free/local.
+          A short written summary of an episode - one small text-only LLM call, done by the Captioning worker.
+          Optional: useful for shows the model does not already know.
         </p>
         {stats && (
           <div style={{ display: "flex", gap: "2rem", flexWrap: "wrap" }}>
@@ -392,19 +380,9 @@ export default function PipelinePage() {
               hint="one small text-only LLM call per episode"
             />
             <Stat
-              label="Chunks embedded"
-              value={`${stats.chunks_indexed} / ${stats.total_chunks}`}
-              hint="powers the Chunks search page"
-            />
-            <Stat
               label="Summary queue"
               value={stats.episode_summary_queue}
               hint="drained by the Captioning worker (costs a small amount)"
-            />
-            <Stat
-              label="Chunk reindex queue"
-              value={stats.transcript_chunk_reindex_queue}
-              hint="drained by the local worker, free"
             />
           </div>
         )}

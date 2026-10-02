@@ -76,11 +76,6 @@ export default function SourceDetailPage() {
     queryFn: () => api.listScenes({ source_id: sourceId, limit: 500 }),
     enabled: !!source,
   });
-  const { data: chunks } = useQuery({
-    queryKey: ["chunks", "source", sourceId],
-    queryFn: () => api.listTranscriptChunks(sourceId),
-    enabled: !!source,
-  });
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["source", sourceId] });
@@ -104,14 +99,6 @@ export default function SourceDetailPage() {
   });
   const cancelSummaryMutation = useMutation({
     mutationFn: () => api.cancelEpisodeSummary(sourceId),
-    onSuccess: invalidate,
-  });
-  const chunksMutation = useMutation({
-    mutationFn: () => api.reindexTranscriptChunks(sourceId),
-    onSuccess: invalidate,
-  });
-  const cancelChunksMutation = useMutation({
-    mutationFn: () => api.cancelTranscriptChunkReindex(sourceId),
     onSuccess: invalidate,
   });
 
@@ -161,7 +148,6 @@ export default function SourceDetailPage() {
             <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", fontFamily: "var(--font-mono)", fontSize: "0.85rem" }}>
               <IndexBadge label="T" title="Text index" done={source.text_indexed_count} total={source.scene_count} />
               <IndexBadge label="V" title="Visual index" done={source.visual_indexed_count} total={source.scene_count} />
-              <IndexBadge label="C" title="Chunk index" done={source.chunk_indexed_count} total={source.chunk_count} />
             </div>
           </div>
           <div>
@@ -223,16 +209,6 @@ export default function SourceDetailPage() {
             pending={summaryMutation.isPending}
             cancelling={cancelSummaryMutation.isPending}
           />
-          <TaskButton
-            label="chunks"
-            requested={source.transcript_chunk_reindex_requested}
-            total={source.chunk_count}
-            indexedCount={source.chunk_indexed_count}
-            onClick={() => chunksMutation.mutate()}
-            onCancel={() => cancelChunksMutation.mutate()}
-            pending={chunksMutation.isPending}
-            cancelling={cancelChunksMutation.isPending}
-          />
         </div>
       </div>
 
@@ -248,19 +224,6 @@ export default function SourceDetailPage() {
         <div className="results">{scenes?.map((scene) => <SceneCard key={scene.id} scene={scene} />)}</div>
       </div>
 
-      {chunks && chunks.length > 0 && (
-        <div className="card" style={{ marginTop: "0.75rem", maxHeight: "420px", overflowY: "auto" }}>
-          <h3>Transcript chunks ({chunks.length})</h3>
-          {chunks.map((chunk) => (
-            <div className="transcript-line" key={chunk.id}>
-              <span className="ts">
-                {formatTime(chunk.start_time)}–{formatTime(chunk.end_time)}
-              </span>
-              {chunk.raw_text}
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }

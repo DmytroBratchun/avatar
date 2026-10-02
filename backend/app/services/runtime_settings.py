@@ -73,6 +73,16 @@ def set_editor_projects_root(path: str) -> None:
         SETTINGS_PATH.write_text(json.dumps(raw, indent=2), encoding="utf-8")
 
 
+def editor_llm_model() -> str | None:
+    """Model for the video editor's Claude calls (beats, shot queries, background,
+    quotes). These are text-only reading and planning tasks, so the default is
+    Sonnet rather than whatever Claude Code would pick on its own (Opus, ~2.5x the
+    price). Set "editor_llm_model" in settings.json to another model or alias, or to
+    "auto" to let Claude Code choose."""
+    value = (_read_raw().get("editor_llm_model") or "sonnet").strip()
+    return None if value.lower() == "auto" else value
+
+
 def editor_default_look() -> dict:
     """The look (frame, sizes, blur...) new video projects start with - whatever the
     user last saved as default from a project's Look tab."""

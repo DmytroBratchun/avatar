@@ -37,9 +37,33 @@ class SceneOut(BaseModel):
     visual_embedding_model: str | None = None
 
 
+class ShotOut(BaseModel):
+    shot_index: int
+    start_time: float
+    end_time: float
+
+
+class SceneTechnicalOut(BaseModel):
+    """How the scene was built - for understanding the index, not for search."""
+
+    shots: list[ShotOut] = []
+    # time of each keyframe in the episode; the first one is what the visual index holds
+    keyframe_times: list[float] = []
+    previous_scene_id: int | None = None
+    next_scene_id: int | None = None
+    # why the scene ends where it does, as the grouping rules saw it
+    end_reason: str = ""
+    dialogue_gap_after: float | None = None
+    caption_attempts: int = 0
+    caption_error: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
 class SceneDetailOut(SceneOut):
     transcript_lines: list[TranscriptLineOut] = []
     source_file_path: str | None = None
+    technical: SceneTechnicalOut = SceneTechnicalOut()
 
 
 class SceneUpdateIn(BaseModel):

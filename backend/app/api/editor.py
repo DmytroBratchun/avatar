@@ -219,23 +219,32 @@ def get_transcript(project_id: str) -> list[Word]:
 
 @router.post("/projects/{project_id}/run/{stage}", response_model=Project)
 def run_stage(project_id: str, stage: str) -> Project:
+    """Runs the stage now, or queues it if the project is already running one."""
     project = _load(project_id)
-    if stage == "transcribe" and not project.audio_file:
-        raise HTTPException(400, "Upload the narration audio first")
-    if stage in ("beats", "quotes") and project.word_count == 0:
-        raise HTTPException(400, "Transcribe the audio first")
-    if stage in ("queries", "background") and not project.beats:
-        raise HTTPException(400, "Build beats first")
-    if stage == "render" and not any(slot.selected is not None for b in project.beats for slot in b.slots):
-        raise HTTPException(400, "Find footage first")
-    if stage == "select" and not any(slot.text_query or slot.visual_query for b in project.beats for slot in b.slots):
-        raise HTTPException(400, "Write shot queries first")
+    # A stage queued behind others can't be checked yet - what it needs may be exactly
+    # what the stages ahead of it produce. It checks for itself when its turn comes.
+    if not jobs.is_busy(project_id):
+        if stage == "transcribe" and not project.audio_file:
+            raise HTTPException(400, "Upload the narration audio first")
+        if stage in ("beats", "quotes") and project.word_count == 0:
+            raise HTTPException(400, "Transcribe the audio first")
+        if stage in ("queries", "background") and not project.beats:
+            raise HTTPException(400, "Build beats first")
+        if stage == "render" and not any(slot.selected is not None for b in project.beats for slot in b.slots):
+            raise HTTPException(400, "Find footage first")
+        if stage == "select" and not any(slot.text_query or slot.visual_query for b in project.beats for slot in b.slots):
+            raise HTTPException(400, "Write shot queries first")
     try:
         return jobs.start(project_id, stage)
     except KeyError:
         raise HTTPException(404, f"Unknown stage: {stage}")
-    except jobs.JobAlreadyRunning:
-        raise HTTPException(409, "A stage is already running for this project")
+
+
+@router.delete("/projects/{project_id}/queue/{stage}", response_model=Project)
+def unqueue_stage(project_id: str, stage: str) -> Project:
+    """Takes a waiting stage off the project's queue (the running one is not affected)."""
+    _load(project_id)
+    return jobs.unqueue(project_id, stage)
 
 
 class SlotUpdateIn(BaseModel):

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.config import AUDIO_DIR, settings
 from app.db.models import Source, TranscriptLine
+from app.services.transcript_repeats import lines_to_drop
 
 
 def _register_cuda_dll_dirs() -> None:
@@ -75,12 +76,29 @@ def run_transcription(db: Session, source: Source) -> None:
 
     audio_path = extract_audio(source)
     model = _whisper_model()
-    segments, info = model.transcribe(audio_path, word_timestamps=False)
+    # Without conditioning on the previous text, one bad segment can't send the model
+    # into a loop of repeating it - the main source of runs like "Iroh!" x44.
+    segments, info = model.transcribe(audio_path, word_timestamps=False, condition_on_previous_text=False)
 
     if source.duration_seconds is None:
         source.duration_seconds = info.duration
 
-    for i, segment in enumerate(segments):
+    # Whisper yields segments as it goes; progress is reported while collecting them.
+    # Lines are saved only at the end, because a repeated run (see below) is only
+    # known once it ends - which also means a restart mid-transcription leaves no
+    # partial transcript behind.
+    collected = []
+    for segment in segments:
+        collected.append(segment)
+        if len(collected) % 50 == 0:
+            source.current_stage_detail = f"transcribing: {segment.start:.0f}s / {info.duration:.0f}s"
+            db.commit()
+
+    # whatever repeats still get through are dropped, keeping the first line of each run
+    dropped = {id(seg) for seg in lines_to_drop(collected, lambda seg: seg.text)}
+    for segment in collected:
+        if id(segment) in dropped:
+            continue
         db.add(
             TranscriptLine(
                 source_id=source.id,
@@ -89,8 +107,4 @@ def run_transcription(db: Session, source: Source) -> None:
                 text=segment.text.strip(),
             )
         )
-        if i % 50 == 0:
-            source.current_stage_detail = f"transcribing: {segment.start:.0f}s / {info.duration:.0f}s"
-            db.commit()
-
     db.flush()

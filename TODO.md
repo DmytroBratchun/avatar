@@ -25,10 +25,11 @@
 
 ## Data quality
 - [ ] Deeper tag de-dup pass - the one-off `normalize_tags.py` script only merges casing/plural variants; semantic duplicates remain (e.g. "Fire Nation ship" vs "Fire Navy shipwreck" - same place, different wording, needs embedding-similarity or LLM-based merge)
-- [ ] Episode 11 ("The Great Divide") has a Whisper transcription hallucination - "Yip-yip!" repeated 30+ times in a 0.5s loop, likely on background music/silence
+- [x] Whisper repeat hallucinations ("Yip-yip!" x30, "Iroh!" x44 ...) - 4022 lines in 105 episodes removed 2026-10-02 with `scripts/collapse_transcript_repeats.py` (backup: `backend/data/avatar.before-repeat-cleanup.db`); new transcriptions use `condition_on_previous_text=False` and drop runs of 5+ identical lines
 - [ ] Episode titles parsed from filenames have a cosmetic double-dash artifact ("Avatar The Last Airbender - - The Boy in the Iceberg") from the `SxxEyy` strip in `episode_parser.py`
 
 ## Cleanup
+- [ ] Transcript chunks are no longer used by anything in the UI (removed 2026-10-02; quotes now read whole episodes). The table, vectors, `/api/transcript-chunks`, the chunking stage and the chunk reindex queue are still in the backend - remove them or keep for a future universe.
 - [ ] `transcript_fts` (FTS5 virtual table) is dead code - created in `db/session.py` but never populated or queried; transcript search ended up using plain `LIKE` instead. Remove it or actually wire it up.
 
 ## Remaining indexing work

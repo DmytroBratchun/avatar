@@ -262,6 +262,36 @@ a {
   }
 }
 
+/* stage progress bar */
+.progress {
+  height: 4px;
+  margin-top: 0.35rem;
+  border-radius: 2px;
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+
+.progress > div {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.4s;
+}
+
+/* no count to show (waiting on an LLM call): a bar that slides back and forth */
+.progress.indeterminate > div {
+  animation: progress-slide 1.4s ease-in-out infinite alternate;
+}
+
+@keyframes progress-slide {
+  from {
+    margin-left: 0;
+  }
+  to {
+    margin-left: 70%;
+  }
+}
+
 .topnav a {
   color: var(--text-secondary);
   text-decoration: none;
@@ -771,6 +801,19 @@ video {
   color: var(--text-tertiary);
   font-size: 0.75rem;
   margin-right: 0.5rem;
+}
+
+/* a timestamp that jumps the player there */
+.transcript-line .ts-seek {
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+.transcript-line .ts-seek:hover {
+  color: var(--accent);
+  text-decoration: underline;
 }
 
 textarea {

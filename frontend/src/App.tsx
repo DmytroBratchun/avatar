@@ -9,7 +9,6 @@ import ScenesPage from "./pages/ScenesPage";
 import SourceDetailPage from "./pages/SourceDetailPage";
 import DatabasePage from "./pages/DatabasePage";
 import PipelinePage from "./pages/PipelinePage";
-import TranscriptChunkSearchPage from "./pages/TranscriptChunkSearchPage";
 import EditorPage from "./pages/EditorPage";
 import EditorProjectPage from "./pages/EditorProjectPage";
 import SettingsModal from "./components/SettingsModal";
@@ -121,7 +120,6 @@ function App() {
             </NavLink>
             <NavLink to="/scenes">Scenes</NavLink>
             <NavLink to="/search">Search</NavLink>
-            <NavLink to="/transcript-chunks">Chunks</NavLink>
             <NavLink to="/pipeline">Pipeline</NavLink>
             <NavLink to="/logs">Logs</NavLink>
             <NavLink to="/database">Database</NavLink>
@@ -180,7 +178,6 @@ function App() {
           <Route path="/logs" element={<LogsPage />} />
           <Route path="/editor" element={<EditorPage />} />
           <Route path="/editor/:id" element={<EditorProjectPage />} />
-          <Route path="/transcript-chunks" element={<TranscriptChunkSearchPage />} />
         </Routes>
       </main>
       {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
