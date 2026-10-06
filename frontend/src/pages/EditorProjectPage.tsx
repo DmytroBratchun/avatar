@@ -20,12 +20,57 @@ function elapsed(since: string, now: number): string {
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${(seconds % 60).toString().padStart(2, "0")}s`;
 }
 
+/** When the running stage's current counted step ("rendering clips 95/147") should
+ * finish, as a timestamp - or null while that can't be told. Measured from how fast
+ * the count has moved since this page first saw the step, not from when the stage
+ * started: a stage can spend time on other steps before the one it counts. */
+function useEta(job: EditorJob | null): number | null {
+  const running = job?.status === "running";
+  // the step, whatever its numbers are: "render:rendering clips #/#"
+  const step = running ? `${job.stage}:${job.detail.replace(/\d+(\.\d+)?/g, "#")}` : "";
+  const progress = running ? job.progress : null;
+  const first = useRef<{ step: string; at: number; progress: number } | null>(null);
+  const [eta, setEta] = useState<number | null>(null);
+  useEffect(() => {
+    const at = Date.now();
+    if (progress == null) {
+      first.current = null;
+      setEta(null);
+    } else if (first.current?.step !== step || progress < first.current.progress) {
+      first.current = { step, at, progress };
+      setEta(null);
+    } else if (progress > first.current.progress) {
+      setEta(at + ((1 - progress) * (at - first.current.at)) / (progress - first.current.progress));
+    }
+  }, [step, progress]);
+  return eta;
+}
+
+/** "≈ 1m 20s left, ready at 18:42", counting down. */
+function Eta({ at }: { at: number }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  const seconds = Math.max(0, Math.round((at - now) / 1000));
+  if (seconds === 0) return <>almost ready</>;
+  const left = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${(seconds % 60).toString().padStart(2, "0")}s`;
+  const ready = new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return (
+    <>
+      ≈ {left} left, ready at {ready}
+    </>
+  );
+}
+
 function StageRow({
   label,
   description,
   state,
   done,
   job,
+  eta,
   queuePosition,
   canRun,
   somethingRunning,
@@ -38,6 +83,8 @@ function StageRow({
   done: boolean;
   // this stage's job, when it is the one running or the one that last failed
   job: EditorJob | null;
+  // when the running step should finish (see useEta), if known
+  eta: number | null;
   // 1-based place in the queue, or 0 when not queued
   queuePosition: number;
   canRun: boolean;
@@ -66,6 +113,12 @@ function StageRow({
           {running ? (
             <>
               <span className="badge accent">running</span> {job?.detail} · {elapsed(job?.started_at ?? "", now)}
+              {eta != null && (
+                <>
+                  {" · "}
+                  <Eta at={eta} />
+                </>
+              )}
             </>
           ) : queuePosition > 0 ? (
             <span className="badge">queued #{queuePosition}</span>
@@ -266,6 +319,8 @@ export default function EditorProjectPage() {
     setPlayingBeat(beat);
   }
 
+  const eta = useEta(project?.job ?? null);
+
   if (error) return <p className="error-text">{(error as Error).message}</p>;
   if (!project) return <p>Loading…</p>;
 
@@ -392,10 +447,17 @@ export default function EditorProjectPage() {
 
       {/* what is running or went wrong is shown on every tab */}
       {tab !== "pipeline" && running && (
-        <p style={{ margin: "0 0 0.75rem" }}>
-          <span className="badge accent">{project.job?.stage} running</span>{" "}
-          <span className="hint">
+        <p style={{ margin: "0 0 0.75rem", display: "flex", alignItems: "center", gap: "0.45rem", flexWrap: "wrap" }}>
+          <span className="spinner" />
+          <span className="badge accent">{project.job?.stage} running</span>
+          <span className="hint" style={{ margin: 0 }}>
             {project.job?.detail}
+            {eta != null && (
+              <>
+                {" · "}
+                <Eta at={eta} />
+              </>
+            )}
             {project.queue.length > 0 && ` · then ${project.queue.join(", ")}`}
           </span>
         </p>
@@ -470,6 +532,7 @@ export default function EditorProjectPage() {
                 state={stage.state}
                 done={stage.done}
                 job={project.job?.stage === stage.key ? project.job : null}
+                eta={project.job?.stage === stage.key ? eta : null}
                 queuePosition={project.queue.indexOf(stage.key) + 1}
                 // when something is running or queued, what this stage needs may be on its way
                 canRun={!!project.audio_file && (stage.ready || running || project.queue.length > 0)}
@@ -484,6 +547,18 @@ export default function EditorProjectPage() {
 
       {tab === "quotes" && (
         <>
+          <label className="hint" style={{ display: "flex", alignItems: "center", gap: "0.4rem", margin: "0 0 0.75rem", cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              style={{ width: "auto" }}
+              checked={project.settings.quote_cuts}
+              disabled={busy}
+              onChange={(e) => settingsMutation.mutate({ quote_cuts: e.target.checked })}
+            />
+            <span title="A quote may be put together from two or three pieces of one moment, played back to back with what was said between them cut out. Applies to the next quote search.">
+              Cut quotes together from pieces (experimental)
+            </span>
+          </label>
           {project.quotes.length > 0 ? (
           <QuotesCard project={project} disabled={busy} onChange={setProject} />
         ) : (

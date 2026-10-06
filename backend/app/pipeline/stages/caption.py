@@ -12,7 +12,12 @@ from sqlalchemy.orm import Session
 
 from app.config import BACKEND_DIR, settings
 from app.db.models import Scene, Source, TranscriptLine
-from app.services.runtime_settings import current_anthropic_api_key, current_caption_model, current_caption_provider
+from app.services.runtime_settings import (
+    caption_only_undescribed,
+    current_anthropic_api_key,
+    current_caption_model,
+    current_caption_provider,
+)
 from app.services.universes import Universe, universe_for_show
 
 logger = logging.getLogger(__name__)
@@ -397,11 +402,11 @@ def _tag_list(value) -> list[str]:
 
 
 def run_captioning(db: Session, source: Source) -> None:
-    scenes = list(
-        db.execute(
-            select(Scene).where(Scene.source_id == source.id, Scene.caption_status != "done")
-        ).scalars()
-    )
+    stmt = select(Scene).where(Scene.source_id == source.id, Scene.caption_status != "done")
+    if caption_only_undescribed():
+        # the fan wiki already describes the rest for free
+        stmt = stmt.where(Scene.wiki_description.is_(None))
+    scenes = list(db.execute(stmt.order_by(Scene.start_time)).scalars())
     if not scenes:
         return
 

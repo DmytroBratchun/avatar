@@ -50,6 +50,7 @@ class ProjectUpdateIn(BaseModel):
     corner_radii: list[int] | None = None
     background_speed: float | None = None
     wide_full_screen: bool | None = None
+    quote_cuts: bool | None = None
 
 
 def _load(project_id: str) -> Project:
@@ -148,6 +149,8 @@ def update_project(project_id: str, payload: ProjectUpdateIn) -> Project:
             p.settings.wide_fill = min(1.0, max(0.0, data["wide_fill"]))
         if data.get("wide_full_screen") is not None:
             p.settings.wide_full_screen = data["wide_full_screen"]
+        if data.get("quote_cuts") is not None:
+            p.settings.quote_cuts = data["quote_cuts"]
 
     return store.update_project(project_id, apply)
 
@@ -535,13 +538,16 @@ class QuoteUpdateIn(BaseModel):
     # seconds in the episode; either can be given alone to move one end of the clip
     clip_start: float | None = None
     clip_end: float | None = None
+    # index of a piece to take out of a quote that is cut together from several
+    drop_part: int | None = None
 
 
 @router.patch("/projects/{project_id}/quotes/{quote_id}", response_model=Project)
 def update_quote(project_id: str, quote_id: str, payload: QuoteUpdateIn) -> Project:
     """Approve/reject a proposed quote, move it, or change where its clip starts and
     ends in the episode. Once beats exist a quote can only sit between two beats, so
-    the position snaps to the nearest boundary."""
+    the position snaps to the nearest boundary. Setting the range by hand makes a quote
+    cut from pieces one continuous clip again; drop_part takes one piece out."""
     from app.editor.quotes import resolve_placement, text_between
 
     project = _load(project_id)
@@ -557,6 +563,8 @@ def update_quote(project_id: str, quote_id: str, payload: QuoteUpdateIn) -> Proj
     new_start = current.clip_start if payload.clip_start is None else max(0.0, payload.clip_start)
     new_end = current.clip_end if payload.clip_end is None else payload.clip_end
     retimed = (new_start, new_end) != (current.clip_start, current.clip_end)
+    if payload.drop_part is not None and (retimed or not 0 <= payload.drop_part < len(current.parts)):
+        raise HTTPException(400, "No such piece in this quote")
     new_text = None
     if retimed:
         if new_end - new_start < 0.5:
@@ -570,8 +578,14 @@ def update_quote(project_id: str, quote_id: str, payload: QuoteUpdateIn) -> Proj
         quote = next(q for q in p.quotes if q.id == quote_id)
         if retimed:
             quote.clip_start, quote.clip_end = round(new_start, 3), round(new_end, 3)
+            quote.parts = []
             if new_text:
                 quote.text = new_text
+        if payload.drop_part is not None and payload.drop_part < len(quote.parts):
+            left = [part for i, part in enumerate(quote.parts) if i != payload.drop_part]
+            quote.clip_start, quote.clip_end = left[0].start, left[-1].end
+            quote.text = " … ".join(part.text for part in left)
+            quote.parts = left if len(left) > 1 else []
         if payload.status is not None:
             quote.status = payload.status
         if payload.after_word is not None:

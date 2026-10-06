@@ -12,6 +12,8 @@ interface Task {
   kind: string;
   active: boolean;
   detail?: string | null;
+  // how much of the episode the task covers
+  scope?: string | null;
 }
 
 function buildTaskList(
@@ -45,6 +47,8 @@ function buildTaskList(
         kind: "captioning",
         active: source.id === captionCurrentId,
         detail: source.id === captionCurrentId ? source.current_stage_detail : null,
+        // not the whole episode: only its scenes that still need a caption
+        scope: source.scene_count > 0 ? `${source.to_caption_count} of ${source.scene_count} scenes` : null,
       });
     }
     if (source.episode_summary_requested) {
@@ -101,6 +105,8 @@ function TaskGroup({
         <strong style={{ fontSize: "0.85rem" }}>{title}</strong>
         <span className="hint" style={{ margin: 0 }}>
           {tasks.length} queued
+          {tasks.some((t) => t.scope) &&
+            ` · ${tasks.reduce((sum, t) => sum + (t.scope ? t.source.to_caption_count : 0), 0)} scenes left`}
         </span>
       </div>
       <div style={{ marginTop: "0.3rem", display: "flex", flexDirection: "column", gap: "0.2rem" }}>
@@ -123,6 +129,7 @@ function TaskGroup({
               {t.label}
             </Link>
             <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+              {t.scope && <span className="hint" style={{ margin: 0 }}>{t.scope}</span>}
               {t.active && t.detail && <span className="hint" style={{ margin: 0 }}>{t.detail}</span>}
               {CANCELABLE_KINDS.has(t.kind) && (
                 <button
@@ -145,6 +152,10 @@ function TaskGroup({
       )}
     </div>
   );
+}
+
+function percent(part: number, whole: number): string {
+  return whole > 0 ? `${Math.round((part / whole) * 100)}%` : "0%";
 }
 
 function Stat({ label, value, hint }: { label: string; value: string | number; hint?: string }) {
@@ -330,8 +341,9 @@ export default function PipelinePage() {
       <div className="card" style={{ marginTop: "0.75rem" }}>
         <h3>Index coverage</h3>
         <p className="hint">
-          Two independent indexes, built at different stages. Transcript keyword search needs neither. Semantic search
-          needs the matching index below to be populated for a scene.
+          Three independent indexes. A text query finds a scene through its paid caption or through the fan wiki's
+          description of it; a scene with neither is found only by how its picture looks. Transcript keyword search
+          needs none of them.
         </p>
         {stats && (
           <div style={{ display: "flex", gap: "2rem", flexWrap: "wrap" }}>
@@ -342,14 +354,26 @@ export default function PipelinePage() {
               hint={stats.caption_error > 0 ? `${stats.caption_error} errored` : undefined}
             />
             <Stat
-              label="Text index (BGE)"
+              label="Caption index (paid)"
               value={`${stats.text_indexed} / ${stats.total_scenes}`}
-              hint="powers mode=text and mode=hybrid"
+              hint={`${percent(stats.text_indexed, stats.total_scenes)} - powers mode=text and mode=hybrid`}
             />
             <Stat
-              label="Visual index (CLIP)"
+              label="Wiki index (free)"
+              value={`${stats.wiki_indexed} / ${stats.total_scenes}`}
+              hint={`${percent(stats.wiki_indexed, stats.total_scenes)} - scenes the fan wiki describes; searched together with captions`}
+            />
+            <Stat
+              label="Described in total"
+              value={`${stats.described} / ${stats.total_scenes}`}
+              hint={`${percent(stats.described, stats.total_scenes)} have a caption or a wiki description (${stats.in_both_text_indexes} have both); ${
+                stats.total_scenes - stats.described
+              } have neither${stats.caption_only_undescribed ? " - captioning fills only these" : ""}`}
+            />
+            <Stat
+              label="Visual index"
               value={`${stats.visual_indexed} / ${stats.total_scenes}`}
-              hint="powers mode=visual and mode=hybrid"
+              hint={`${percent(stats.visual_indexed, stats.total_scenes)} - powers mode=visual and mode=hybrid`}
             />
             <Stat label="Transcript lines" value={stats.transcript_lines} hint="powers keyword search, always free" />
             <Stat

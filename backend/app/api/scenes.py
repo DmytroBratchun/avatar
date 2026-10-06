@@ -1,7 +1,7 @@
 import datetime as dt
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, text
+from sqlalchemy import select, text, or_
 from sqlalchemy.orm import Session
 
 from app.db.models import Scene, Source, TranscriptChunk, TranscriptLine
@@ -12,6 +12,7 @@ from app.pipeline.stages.extract_keyframes import _OFFSETS_BY_COUNT
 from app.schemas.scenes import FacetsOut, SceneDetailOut, SceneOut, SceneUpdateIn
 from app.services.embeddings import embed_text, text_embedding_model_id
 from app.vectorstore.sqlite_vec_client import upsert_text_vector
+from app.services.runtime_settings import caption_only_undescribed
 
 router = APIRouter(prefix="/api/scenes", tags=["scenes"])
 
@@ -98,6 +99,20 @@ def get_index_stats(db: Session = Depends(get_db)) -> dict:
     visual_indexed = db.execute(
         select(text("COUNT(*)")).select_from(Scene).where(Scene.visual_embedding_model.isnot(None))
     ).scalar_one()
+    wiki_indexed = db.execute(
+        select(text("COUNT(*)")).select_from(Scene).where(Scene.wiki_description.isnot(None))
+    ).scalar_one()
+    # found by a text query through either index: a paid caption or the wiki's description
+    described = db.execute(
+        select(text("COUNT(*)")).select_from(Scene).where(
+            or_(Scene.text_embedding_model.isnot(None), Scene.wiki_description.isnot(None))
+        )
+    ).scalar_one()
+    in_both = db.execute(
+        select(text("COUNT(*)")).select_from(Scene).where(
+            Scene.text_embedding_model.isnot(None), Scene.wiki_description.isnot(None)
+        )
+    ).scalar_one()
     transcript_lines = db.execute(select(text("COUNT(*)")).select_from(TranscriptLine)).scalar_one()
     visual_reindex_queue = db.execute(
         select(text("COUNT(*)")).select_from(Source).where(Source.visual_reindex_requested.is_(True))
@@ -126,6 +141,10 @@ def get_index_stats(db: Session = Depends(get_db)) -> dict:
         "caption_error": caption_error,
         "text_indexed": text_indexed,
         "visual_indexed": visual_indexed,
+        "wiki_indexed": wiki_indexed,
+        "described": described,
+        "in_both_text_indexes": in_both,
+        "caption_only_undescribed": caption_only_undescribed(),
         "transcript_lines": transcript_lines,
         "visual_reindex_queue": visual_reindex_queue,
         "text_reindex_queue": text_reindex_queue,

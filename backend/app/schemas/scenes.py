@@ -107,6 +107,8 @@ class SourceOut(BaseModel):
     indexed_at: dt.datetime | None
     scene_count: int = 0
     text_indexed_count: int = 0
+    # scenes the captioning worker would still caption in this episode
+    to_caption_count: int = 0
     visual_indexed_count: int = 0
     visual_reindex_requested: bool = False
     text_reindex_requested: bool = False

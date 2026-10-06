@@ -18,6 +18,7 @@ it: the model sees who is talking to whom, and finds lines that match in meaning
 rather than in wording.
 """
 
+import copy
 import difflib
 import re
 import subprocess
@@ -29,7 +30,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import BankQuote, Source, TranscriptLine
 from app.editor.llm import run_claude_json
-from app.editor.store import Project, Quote, Word, project_shows, project_universe
+from app.editor.store import Project, Quote, QuotePart, Word, project_shows, project_universe
 
 MAX_QUOTES = 8
 EPISODES_PER_QUOTE = 3
@@ -38,8 +39,16 @@ EPISODES_PER_QUOTE = 3
 QUOTE_MODEL = "opus"
 # transcripts are read in batches of episodes, at most about this many characters per call
 BATCH_CHARS = 60_000
-MAX_QUOTE_SECONDS = 40.0
+# A quote is a sentence or two. Whole speeches and exchanges stall the narration, so
+# the prompts ask for QUOTE_LENGTH and a longer clip is dropped.
+MAX_QUOTE_SECONDS = 12.0
+QUOTE_LENGTH = "one or two sentences, about 2 to 8 seconds of speech (up to some 20 words)"
+# banked quotes are whole exchanges; the model is shown those up to this long and takes a part
+MAX_BANK_SECONDS = 40.0
 BANK_LINE_CHARS = 320  # how much of a banked quote is shown to the model
+# how many more words may sit between two matched runs in the audio than in the quote
+# before the outer run is taken for a chance match elsewhere in the fragment
+MATCH_GAP_WORDS = 3
 FRAGMENT_PADDING = 2.0  # seconds of audio either side of the lines, re-transcribed to find the exact words
 LEAD_IN, LEAD_OUT = 0.2, 0.3  # breathing room kept around the spoken words
 SENTENCE_END = (".", "!", "?", "…", '."', '!"', '?"')
@@ -58,6 +67,14 @@ WANTED_SCHEMA = {
                         "description": (
                             "Number (after Q) of a quote from the quote bank, when one of them is the line you "
                             "want. Then leave episodes empty. Omit when the line is not in the bank."
+                        ),
+                    },
+                    "bank_part": {
+                        "type": "string",
+                        "description": (
+                            "With bank_quote: the words of that quote to play, copied exactly, without speaker "
+                            f"names - {QUOTE_LENGTH}. Banked quotes are usually longer than that; take only the "
+                            "part that makes the point."
                         ),
                     },
                     "query": {
@@ -104,6 +121,49 @@ PICK_SCHEMA = {
     "required": ["quotes"],
 }
 
+# Quote cuts (the project's quote_cuts setting): a quote may be put together from up
+# to MAX_PIECES pieces of one moment, played back to back with the middle left out.
+# These fields are only offered to the model when the setting is on.
+MAX_PIECES = 3
+# pieces that come out closer together than this play as one: nothing worth skipping
+JOIN_GAP = 0.6
+# pieces must come from one stretch of the episode at most this long
+MAX_CUT_SPAN = 60.0
+BANK_THEN = {
+    "type": "array",
+    "items": {"type": "string"},
+    "description": (
+        "With bank_quote, optional: one or two more pieces of the same quote to play straight after "
+        "bank_part, in the order they are spoken, copied exactly - what is said between the pieces is cut out."
+    ),
+}
+PICK_THEN = {
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {"first_line": {"type": "integer"}, "last_line": {"type": "integer"}},
+        "required": ["first_line", "last_line"],
+    },
+    "description": (
+        "Optional: one or two more runs of lines from later in the same scene, to play straight after the "
+        "first - the lines between the runs are cut out."
+    ),
+}
+CUTS_HINT = (
+    "A quote may also be cut together: when the point takes two sentences that have something else said "
+    "between them - a set-up and its answer, the two strong sentences of a speech - give them as separate "
+    "pieces ({field}) and they play back to back with the middle left out. Each piece is a whole sentence, "
+    "the pieces together keep to the same length, and they must still sound like one thought when joined; "
+    "when one continuous piece does the job, use one."
+)
+
+
+def _offering(schema: dict, field: str, spec: dict) -> dict:
+    """The schema with one more optional field on each quote."""
+    schema = copy.deepcopy(schema)
+    schema["properties"]["quotes"]["items"]["properties"][field] = spec
+    return schema
+
 
 def sentence_ends(words: list[Word]) -> list[int]:
     """Word index of the last word of every sentence."""
@@ -148,9 +208,32 @@ def _episode_label(source: Source, universe) -> str:
 
 
 def _bank(db: Session, episodes: dict[int, Source]) -> dict[int, BankQuote]:
-    """Banked quotes from the project's episodes that are short enough to use whole."""
+    """Banked quotes from the project's episodes that are short enough to show in full."""
     rows = db.execute(select(BankQuote).where(BankQuote.source_id.in_(list(episodes))).order_by(BankQuote.id)).scalars()
-    return {quote.id: quote for quote in rows if quote.end_time - quote.start_time <= MAX_QUOTE_SECONDS}
+    return {quote.id: quote for quote in rows if quote.end_time - quote.start_time <= MAX_BANK_SECONDS}
+
+
+def _bank_pieces(banked: BankQuote, parts: list[str]) -> tuple[list[str], str]:
+    """(wordings, speakers) of the parts of a banked quote that were asked for - the
+    whole quote when no part was given or none has its words in the quote."""
+    lines = [line.partition(": ") if ": " in line else ("", "", line) for line in banked.text.split("\n")]
+    pieces, speakers = [], []
+    for part in parts:
+        wanted = _tokens(part)
+        said_by, found = [], 0
+        for speaker, _, text in lines:
+            blocks = difflib.SequenceMatcher(a=wanted, b=_tokens(text), autojunk=False).get_matching_blocks()
+            # runs of 3+ words, so that a stray "the" doesn't credit a line with the part
+            shared = sum(block.size for block in blocks if block.size >= min(3, len(wanted)))
+            found += shared
+            if shared and speaker:
+                said_by.append(speaker)
+        if wanted and found >= 0.6 * len(wanted):
+            pieces.append(part.strip())
+            speakers += [s for s in said_by if s not in speakers]
+    if not pieces:
+        return [" ".join(text for _, _, text in lines)], banked.speakers
+    return pieces, ", ".join(speakers) or banked.speakers
 
 
 def _wanted(
@@ -163,10 +246,12 @@ def _wanted(
     universe = project_universe(project)
     shows = ", ".join(project_shows(project)) or universe.name
     listing = "\n".join(f"[{source.id}] {_episode_label(source, universe)}" for source in episodes)
+    cuts = project.settings.quote_cuts
     prompt = (
         f"Below is the narration of a video essay about {shows}, one numbered sentence per line. The editor "
         "wants to drop in a few short clips from the show where a character's own words make the point "
-        "better than the narrator can - proof, a punchline, or an emotional beat.\n\n"
+        "better than the narrator can - proof, a punchline, or an emotional beat. A clip is short: "
+        f"{QUOTE_LENGTH}, never a whole speech or exchange.\n\n"
         f"Suggest up to {MAX_QUOTES} such moments, fewer if the narration doesn't call for them (none is a "
         "fine answer). For each, give the sentence it should play after, the line you have in mind, and the "
         "episodes to look for it in. Only suggest lines that are really spoken in the show; the transcripts "
@@ -174,9 +259,12 @@ def _wanted(
         "Don't pick lines that just repeat what the narrator said.\n\n"
         + (
             "A quote bank is given below: well-known quotes that have already been found in the episodes. "
-            "When the line you want is there, give its number as bank_quote - it is used as written, with no "
-            "search, so prefer the bank when it has a line that fits as well as anything you can recall. When "
-            "nothing in the bank fits, describe the line and name the episodes as usual.\n\n"
+            "When the line you want is there, give its number as bank_quote and the words to play as "
+            "bank_part - it is cut with no search, so prefer the bank when it has a line that fits as well as "
+            "anything you can recall. Most banked quotes are longer than a clip should be: copy only the "
+            "sentence or two that make the point. "
+            + (CUTS_HINT.format(field="bank_part, then bank_then") + " " if cuts else "")
+            + "When nothing in the bank fits, describe the line and name the episodes as usual.\n\n"
             if bank
             else ""
         )
@@ -192,7 +280,8 @@ def _wanted(
             else ""
         )
     )
-    result, cost = run_claude_json(prompt, WANTED_SCHEMA, cwd=cwd, timeout=600, model=QUOTE_MODEL)
+    schema = _offering(WANTED_SCHEMA, "bank_then", BANK_THEN) if cuts and bank else WANTED_SCHEMA
+    result, cost = run_claude_json(prompt, schema, cwd=cwd, timeout=600, model=QUOTE_MODEL)
     known = {source.id for source in episodes}
     wanted = []
     for quote in result["quotes"][:MAX_QUOTES]:
@@ -207,7 +296,7 @@ def _wanted(
 
 
 def _read_episodes(
-    db: Session, wanted: list[dict], episodes: dict[int, Source], universe, cwd: Path, report
+    db: Session, wanted: list[dict], episodes: dict[int, Source], universe, cwd: Path, report, cuts: bool = False
 ) -> tuple[list[dict], dict[int, set[int]], float]:
     """Has Claude read the full transcripts of the named episodes and pick lines.
     Returns the picks, the line ids that were shown per request (to validate picks
@@ -263,15 +352,19 @@ def _read_episodes(
             "transcripts come from speech recognition and may contain errors. A name before a line is who says "
             "it (taken from a fan transcript; not every line has one).\n\n"
             "For each request, find the line or the few consecutive lines that make the best quote - a complete "
-            "thought that stands on its own, ideally 3 to 15 seconds - and give the line ids. Start and end "
+            f"thought that stands on its own, {QUOTE_LENGTH} - and give the line ids. Out of a longer speech "
+            f"or exchange take only its strongest part: a quote over {MAX_QUOTE_SECONDS:.0f} seconds is thrown "
+            "away. Start and end "
             "the quote on whole sentences. Where a line has no name, work out who is speaking from the "
             "conversation around it. If the "
             "line is not in the transcripts given, or nothing there is worth quoting, leave that request out; "
-            "a weak quote is worse than none. Lines must be consecutive and from one episode.\n\n"
-            f"{asks}\n\n" + "\n\n".join(blocks)
+            "a weak quote is worse than none. Lines must be consecutive and from one episode."
+            + (" " + CUTS_HINT.format(field="the first run of lines as usual, the later ones in `then`") if cuts else "")
+            + f"\n\n{asks}\n\n" + "\n\n".join(blocks)
         )
         report(f"reading episodes {b + 1}/{len(batches)}")
-        result, batch_cost = run_claude_json(prompt, PICK_SCHEMA, cwd=cwd, timeout=900, model=QUOTE_MODEL)
+        schema = _offering(PICK_SCHEMA, "then", PICK_THEN) if cuts else PICK_SCHEMA
+        result, batch_cost = run_claude_json(prompt, schema, cwd=cwd, timeout=900, model=QUOTE_MODEL)
         cost += batch_cost or 0.0
         picks.extend(result["quotes"])
     return picks, offered, cost
@@ -301,10 +394,9 @@ def _tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9']+", text.lower())
 
 
-def _exact_span(file_path: str, start: float, end: float, quote_text: str, cache_dir: Path) -> tuple[float, float]:
-    """Where the quoted words actually start and stop in the episode. The index only
-    knows whole lines, so the surrounding audio is transcribed again with word
-    timings and the quote's words are located in it."""
+def _hear(file_path: str, start: float, end: float, cache_dir: Path) -> tuple[float, list]:
+    """Transcribes a stretch of the episode (with some padding) again, with word
+    timings. Returns the time the fragment starts at and the words heard in it."""
     from app.pipeline.stages.transcribe import _whisper_model
 
     fragment_start = max(0.0, start - FRAGMENT_PADDING)
@@ -319,18 +411,67 @@ def _exact_span(file_path: str, start: float, end: float, quote_text: str, cache
         heard = [w for segment in segments for w in (segment.words or []) if w.word.strip()]
     finally:
         wav.unlink(missing_ok=True)
+    return fragment_start, heard
 
-    wanted_tokens = _tokens(quote_text)
-    heard_tokens = [(_tokens(w.word) or [""])[0] for w in heard]
+
+def _locate(heard: list, offset: float, text: str, after: float = 0.0) -> tuple[float, float] | None:
+    """Where the words of `text` start and stop, in episode time, among the words
+    heard at or after `after` - None when they can't be found again."""
+    skip = next((i for i, w in enumerate(heard) if offset + w.start >= after), len(heard))
+    wanted_tokens = _tokens(text)
+    heard_tokens = [(_tokens(w.word) or [""])[0] for w in heard[skip:]]
     matcher = difflib.SequenceMatcher(a=wanted_tokens, b=heard_tokens, autojunk=False)
     blocks = [b for b in matcher.get_matching_blocks() if b.size > 0]
     matched = sum(b.size for b in blocks)
     if not wanted_tokens or matched < 0.6 * len(wanted_tokens):
-        # couldn't find the words again - fall back to the line timings from the index
-        return max(0.0, start - LEAD_IN), end + LEAD_OUT
+        return None
 
-    first, last = heard[blocks[0].b], heard[blocks[-1].b + blocks[-1].size - 1]
-    return max(0.0, fragment_start + first.start - LEAD_IN), fragment_start + last.end + LEAD_OUT
+    # The quote may be a part of what was transcribed, so a word of it can also match
+    # somewhere else in the fragment. Grow outwards from the longest run and stop at a
+    # run that lies much further away in the audio than it does in the quote.
+    low = high = max(range(len(blocks)), key=lambda i: blocks[i].size)
+
+    def apart(before, after) -> bool:
+        return after.b - (before.b + before.size) > after.a - (before.a + before.size) + MATCH_GAP_WORDS
+
+    while low > 0 and not apart(blocks[low - 1], blocks[low]):
+        low -= 1
+    while high < len(blocks) - 1 and not apart(blocks[high], blocks[high + 1]):
+        high += 1
+    first = skip + blocks[low].b
+    last = skip + blocks[high].b + blocks[high].size - 1
+    start = heard[first].start - LEAD_IN
+    end = heard[last].end + LEAD_OUT
+    # the breathing room must not reach into the words said just before and after
+    if first > 0:
+        start = max(start, min(heard[first - 1].end, heard[first].start - 0.05))
+    if last + 1 < len(heard):
+        end = min(end, max(heard[last + 1].start, heard[last].end + 0.1))
+    return max(0.0, offset + start), offset + end
+
+
+def _cut(
+    file_path: str, start: float, end: float, pieces: list[tuple[str, tuple[float, float] | None]], cache_dir: Path
+) -> list[QuotePart]:
+    """Where the quoted words actually are in the episode. The index only knows whole
+    lines, so start..end is transcribed again with word timings and each piece's
+    words are located in it, one after another. A piece comes with the time range to
+    use when its words can't be found again (line timings from the index), or None to
+    leave it out then. Pieces with next to nothing between them come back as one."""
+    offset, heard = _hear(file_path, start, end, cache_dir)
+    parts: list[QuotePart] = []
+    for text, fallback in pieces:
+        span = _locate(heard, offset, text, after=parts[-1].end - LEAD_OUT if parts else 0.0)
+        if span is None:
+            if fallback is None:
+                continue
+            span = (max(0.0, fallback[0] - LEAD_IN), fallback[1] + LEAD_OUT)
+        if parts and span[0] <= parts[-1].end + JOIN_GAP:
+            parts[-1].end = max(parts[-1].end, round(span[1], 3))
+            parts[-1].text += " " + text
+        else:
+            parts.append(QuotePart(start=round(span[0], 3), end=round(span[1], 3), text=text))
+    return parts
 
 
 def find_quotes(db: Session, project: Project, words: list[Word], cwd: Path, report) -> float:
@@ -349,6 +490,7 @@ def find_quotes(db: Session, project: Project, words: list[Word], cwd: Path, rep
         raise RuntimeError("None of this project's shows has a transcript yet")
 
     report("looking for places a quote would help")
+    cuts = project.settings.quote_cuts
     bank = _bank(db, episodes)
     wanted, cost = _wanted(project, words, ends, list(episodes.values()), bank, cwd)
 
@@ -360,8 +502,12 @@ def find_quotes(db: Session, project: Project, words: list[Word], cwd: Path, rep
     cache_dir = cwd / "cache"
     cache_dir.mkdir(exist_ok=True)
 
-    def add(request: int, source: Source, start: float, end: float, text: str, speaker: str, reason: str) -> None:
-        clip_start, clip_end = _exact_span(source.file_path, start, end, text, cache_dir)
+    def add(request: int, source: Source, start: float, end: float, pieces: list, speaker: str, reason: str) -> bool:
+        """Cuts the pieces (see _cut) out of start..end; False when nothing was found
+        or the clip came out too long."""
+        parts = _cut(source.file_path, start, end, pieces, cache_dir)
+        if not parts or sum(part.end - part.start for part in parts) > MAX_QUOTE_SECONDS:
+            return False
         after_word, at, before = resolve_placement(project, words, ends[int(wanted[request]["after_sentence"])])
         project.quotes.append(
             Quote(
@@ -374,13 +520,15 @@ def find_quotes(db: Session, project: Project, words: list[Word], cwd: Path, rep
                 show_title=source.show_title,
                 book=source.book,
                 episode_number=source.episode_number,
-                clip_start=round(clip_start, 3),
-                clip_end=round(clip_end, 3),
-                text=text,
+                clip_start=parts[0].start,
+                clip_end=parts[-1].end,
+                parts=parts if len(parts) > 1 else [],
+                text=" … ".join(part.text for part in parts),
                 speaker=speaker,
                 reason=reason,
             )
         )
+        return True
 
     # quotes taken from the bank are already located - no episodes to read
     answered: set[int] = set()
@@ -393,38 +541,55 @@ def find_quotes(db: Session, project: Project, words: list[Word], cwd: Path, rep
             continue
         report(f"cutting a quote from the bank ({len(answered) + 1})")
         # the wording without the "Speaker:" prefixes, to find the exact words in the audio
-        spoken = " ".join(line.split(": ", 1)[-1] for line in banked.text.split("\n"))
-        add(request, episodes[banked.source_id], banked.start_time, banked.end_time, spoken, banked.speakers, f"From the quote bank. {want['query']}".strip())
+        asked = [want.get("bank_part") or ""] + (list(want.get("bank_then") or []) if cuts else [])
+        spoken, speakers = _bank_pieces(banked, asked[:MAX_PIECES])
+        # a lone piece that can't be heard again plays as the bank timed it
+        whole = (banked.start_time, banked.end_time) if len(spoken) == 1 else None
+        add(request, episodes[banked.source_id], banked.start_time, banked.end_time, [(text, whole) for text in spoken], speakers, f"From the quote bank. {want['query']}".strip())
         answered.add(request)
 
     wanted_search = [want if n not in answered and want["episodes"] else {**want, "episodes": []} for n, want in enumerate(wanted)]
     picks, offered = [], {}
     if any(want["episodes"] for want in wanted_search):
-        picks, offered, read_cost = _read_episodes(db, wanted_search, episodes, universe, cwd, report)
+        picks, offered, read_cost = _read_episodes(db, wanted_search, episodes, universe, cwd, report, cuts)
         cost += read_cost
     for n, pick in enumerate(picks):
         request = int(pick["request"])
         # one quote per request: its episodes may have been read in separate batches
         if not 0 <= request < len(wanted) or request in answered:
             continue
-        lines = list(
-            db.execute(
-                select(TranscriptLine)
-                .where(TranscriptLine.id >= int(pick["first_line"]), TranscriptLine.id <= int(pick["last_line"]))
-                .order_by(TranscriptLine.start_time)
-            ).scalars()
-        )
-        if not lines or len({line.source_id for line in lines}) != 1 or not {line.id for line in lines} <= offered[request]:
+        # the runs of lines to play: one, or several when the quote is cut together
+        runs: list[list[TranscriptLine]] = []
+        for run in [pick, *(pick.get("then") or [])][: MAX_PIECES if cuts else 1]:
+            lines = list(
+                db.execute(
+                    select(TranscriptLine)
+                    .where(TranscriptLine.id >= int(run["first_line"]), TranscriptLine.id <= int(run["last_line"]))
+                    .order_by(TranscriptLine.start_time)
+                ).scalars()
+            )
+            if not lines or not {line.id for line in lines} <= offered[request]:
+                break
+            # line timings include the pauses around the words; the real check is on the cut clip
+            if lines[-1].end_time - lines[0].start_time > MAX_QUOTE_SECONDS * 2:
+                break
+            if runs and (
+                lines[0].source_id != runs[0][0].source_id
+                or lines[0].start_time < runs[-1][-1].end_time
+                or lines[-1].end_time - runs[0][0].start_time > MAX_CUT_SPAN
+            ):
+                break  # a later piece must follow the first, in the same stretch of the episode
+            runs.append(lines)
+        if not runs or len({line.source_id for line in runs[0]}) != 1:
             continue
-        start, end = lines[0].start_time, lines[-1].end_time
-        if end - start > MAX_QUOTE_SECONDS:
-            continue
-        source = db.get(Source, lines[0].source_id)
+        start, end = runs[0][0].start_time, runs[-1][-1].end_time
+        source = db.get(Source, runs[0][0].source_id)
         if any(q.source_id == source.id and q.clip_start < end and q.clip_end > start for q in project.quotes):
             continue  # same moment as a quote already in the list
 
-        answered.add(request)
         report(f"cutting quote {n + 1}/{len(picks)}")
-        add(request, source, start, end, " ".join(line.text.strip() for line in lines), pick["speaker"], pick["reason"])
+        pieces = [(" ".join(line.text.strip() for line in lines), (lines[0].start_time, lines[-1].end_time)) for lines in runs]
+        if add(request, source, start, end, pieces, pick["speaker"], pick["reason"]):
+            answered.add(request)
     project.quotes.sort(key=lambda q: q.at)
     return cost

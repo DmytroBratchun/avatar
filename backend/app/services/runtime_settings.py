@@ -83,6 +83,13 @@ def editor_llm_model() -> str | None:
     return None if value.lower() == "auto" else value
 
 
+def caption_only_undescribed() -> bool:
+    """With "caption_scope": "undescribed" in settings.json, paid captioning skips
+    scenes that already have a description from the fan wiki (Scene.wiki_description)
+    and only fills the gaps. Default ("all") captions every scene."""
+    return (_read_raw().get("caption_scope") or "all") == "undescribed"
+
+
 def editor_default_look() -> dict:
     """The look (frame, sizes, blur...) new video projects start with - whatever the
     user last saved as default from a project's Look tab."""

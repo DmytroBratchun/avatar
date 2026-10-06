@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useState } from "react";
-import { api } from "../api/client";
+import { useRef, useState } from "react";
+import { api, quoteSeconds, quoteSpans } from "../api/client";
 import type { EditorProject, EditorQuote, EditorWord } from "../api/client";
 
 function formatTime(seconds: number): string {
@@ -42,6 +42,40 @@ function around(words: EditorWord[], afterWord: number): { before: string; after
   };
 }
 
+/** Plays a quote the way it will sound in the video: its pieces back to back,
+ * jumping over what was cut out between them. */
+function QuoteClip({ quote }: { quote: EditorQuote }) {
+  const spans = quoteSpans(quote);
+  // the piece being played
+  const piece = useRef(0);
+  return (
+    <video
+      src={`${api.streamUrl(quote.source_id)}#t=${spans[0].start}`}
+      controls
+      autoPlay
+      style={{ width: "100%", maxWidth: "480px", marginTop: "0.5rem", display: "block" }}
+      onTimeUpdate={(e) => {
+        const video = e.currentTarget;
+        if (video.currentTime < spans[piece.current].end) return;
+        if (piece.current + 1 < spans.length) {
+          piece.current += 1;
+          video.currentTime = spans[piece.current].start;
+        } else {
+          video.pause();
+        }
+      }}
+      onPlay={(e) => {
+        // pressing play after the end starts the quote again
+        const video = e.currentTarget;
+        if (piece.current === spans.length - 1 && video.currentTime >= spans[piece.current].end) {
+          piece.current = 0;
+          video.currentTime = spans[0].start;
+        }
+      }}
+    />
+  );
+}
+
 function QuoteRow({
   project,
   quote,
@@ -58,7 +92,7 @@ function QuoteRow({
   const [previewing, setPreviewing] = useState(false);
   const [editing, setEditing] = useState(false);
   const mutation = useMutation({
-    mutationFn: (payload: { status?: string; after_word?: number; clip_start?: number; clip_end?: number }) =>
+    mutationFn: (payload: { status?: string; after_word?: number; clip_start?: number; clip_end?: number; drop_part?: number }) =>
       api.updateEditorQuote(project.id, quote.id, payload),
     onSuccess: onChange,
   });
@@ -67,7 +101,7 @@ function QuoteRow({
     onSuccess: onChange,
   });
   const busy = disabled || mutation.isPending || removeMutation.isPending;
-  const length = quote.clip_end - quote.clip_start;
+  const length = quoteSeconds(quote);
   const context = around(words, quote.after_word);
   const [startText, setStartText] = useState(clock(quote.clip_start));
   const [endText, setEndText] = useState(clock(quote.clip_end));
@@ -83,7 +117,8 @@ function QuoteRow({
         </span>
         <strong>{quote.speaker || "unknown"}</strong>
         <span className="hint" style={{ margin: 0 }}>
-          Book {quote.book ?? "?"} Ep {quote.episode_number ?? "?"} · {formatTime(quote.clip_start)} · {length.toFixed(1)}s · placed at {formatTime(quote.at)} of the narration
+          Book {quote.book ?? "?"} Ep {quote.episode_number ?? "?"} · {formatTime(quote.clip_start)} · {length.toFixed(1)}s
+          {quote.parts.length > 0 && ` in ${quote.parts.length} pieces`} · placed at {formatTime(quote.at)} of the narration
         </span>
       </div>
 
@@ -130,9 +165,28 @@ function QuoteRow({
         </button>
       </div>
 
+      {editing &&
+        quote.parts.map((part, index) => (
+          <div key={part.start} style={{ marginTop: "0.5rem", display: "flex", gap: "0.5rem", alignItems: "baseline", flexWrap: "wrap" }}>
+            <span className="hint" style={{ margin: 0 }}>
+              Piece {index + 1} · {clock(part.start)}-{clock(part.end)} · {(part.end - part.start).toFixed(1)}s
+            </span>
+            <span style={{ fontSize: "0.9rem" }}>“{part.text}”</span>
+            <button className="ghost small" disabled={busy} onClick={() => mutation.mutate({ drop_part: index })} title="Play the quote without this piece">
+              × remove
+            </button>
+          </div>
+        ))}
       {editing && (
         <div style={{ marginTop: "0.5rem", display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
-          <span className="hint" style={{ margin: 0 }} title="Where the clip starts and ends in the episode, as minutes:seconds">
+          <span
+            className="hint"
+            style={{ margin: 0 }}
+            title={
+              "Where the clip starts and ends in the episode, as minutes:seconds." +
+              (quote.parts.length > 0 ? " Applying a range plays everything between the two times, with nothing cut out." : "")
+            }
+          >
             Clip in the episode from
           </span>
           <input style={{ width: "5.5rem" }} value={startText} onChange={(e) => setStartText(e.target.value)} disabled={busy} />
@@ -140,7 +194,7 @@ function QuoteRow({
           <input style={{ width: "5.5rem" }} value={endText} onChange={(e) => setEndText(e.target.value)} disabled={busy} />
           <button
             className="small"
-            disabled={busy || !rangeChanged}
+            disabled={busy || !(rangeChanged || (quote.parts.length > 0 && newStart !== null && newEnd !== null))}
             onClick={() => newStart !== null && newEnd !== null && mutation.mutate({ clip_start: newStart, clip_end: newEnd })}
           >
             Apply
@@ -172,14 +226,7 @@ function QuoteRow({
         </div>
       )}
 
-      {previewing && (
-        <video
-          src={`${api.streamUrl(quote.source_id)}#t=${quote.clip_start},${quote.clip_end}`}
-          controls
-          autoPlay
-          style={{ width: "100%", maxWidth: "480px", marginTop: "0.5rem", display: "block" }}
-        />
-      )}
+      {previewing && <QuoteClip quote={quote} />}
       {mutation.isError && <p className="error-text">{(mutation.error as Error).message}</p>}
     </div>
   );
@@ -303,7 +350,7 @@ export default function QuotesCard({
 
   if (project.quotes.length === 0) return null;
   const approved = project.quotes.filter((q) => q.status === "approved");
-  const added = approved.reduce((sum, q) => sum + (q.clip_end - q.clip_start), 0);
+  const added = approved.reduce((sum, q) => sum + quoteSeconds(q), 0);
 
   return (
     <div className="card">
@@ -320,7 +367,7 @@ export default function QuotesCard({
         render again to see them.
       </p>
       {project.quotes.map((quote) => (
-        <QuoteRow key={`${quote.id}-${quote.clip_start}-${quote.clip_end}`} project={project} quote={quote} words={words ?? []} disabled={disabled} onChange={onChange} />
+        <QuoteRow key={`${quote.id}-${quote.clip_start}-${quote.clip_end}-${quote.parts.length}`} project={project} quote={quote} words={words ?? []} disabled={disabled} onChange={onChange} />
       ))}
     </div>
   );

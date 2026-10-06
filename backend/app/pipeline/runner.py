@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Scene, Source
 from app.pipeline.stages.caption import CaptioningUnavailable, run_captioning
+from app.services.runtime_settings import caption_only_undescribed
 from app.pipeline.stages.detect_shots import run_shot_detection
 from app.pipeline.stages.embed import run_embedding, run_text_embedding_only, run_visual_embedding_only
 from app.pipeline.stages.episode_summary import run_episode_summary
@@ -52,10 +53,12 @@ def requeue_interrupted_local_sources(db: Session) -> list[int]:
 
 
 def _is_fully_indexed(db: Session, source: Source) -> bool:
-    unembedded = db.execute(
-        select(Scene.id).where(Scene.source_id == source.id, Scene.embedded_at.is_(None))
-    ).first()
-    return unembedded is None
+    stmt = select(Scene.id).where(Scene.source_id == source.id, Scene.embedded_at.is_(None))
+    if caption_only_undescribed():
+        # scenes described by the fan wiki are not captioned in this mode, so they
+        # don't count as unfinished
+        stmt = stmt.where(Scene.wiki_description.is_(None))
+    return db.execute(stmt).first() is None
 
 
 def dequeue_source(db: Session, source: Source) -> None:

@@ -125,6 +125,14 @@ class Beat(BaseModel):
     backgrounds: list[Background] = Field(default_factory=list)
 
 
+class QuotePart(BaseModel):
+    """One piece of a quote that is cut together from several."""
+
+    start: float
+    end: float
+    text: str = ""
+
+
 class Quote(BaseModel):
     """A clip of dialogue from the show, played with its own sound between two
     pieces of narration. Only "approved" quotes are part of the video."""
@@ -142,9 +150,17 @@ class Quote(BaseModel):
     episode_number: int | None = None
     clip_start: float
     clip_end: float
+    # A quote cut together from pieces of one moment: they play back to back, with
+    # what was said between them left out (a hard cut). Empty = one continuous clip;
+    # otherwise clip_start/clip_end are the first piece's start and the last one's end.
+    parts: list[QuotePart] = Field(default_factory=list)
     text: str
     speaker: str = ""
     reason: str = ""
+
+    def spans(self) -> list[tuple[float, float]]:
+        """The stretches of the episode that play, in order."""
+        return [(part.start, part.end) for part in self.parts] or [(self.clip_start, self.clip_end)]
 
 
 class Job(BaseModel):
@@ -182,6 +198,9 @@ class RenderSettings(BaseModel):
     # sides. 0 = show all of it, with the blurred background above and below;
     # 1 = zoom in until it fills the height, cropping the sides; anything between.
     wide_fill: float = 0.0
+    # Experimental, quotes stage: a proposed quote may be cut together from two or
+    # three pieces of a longer speech or exchange instead of one continuous stretch.
+    quote_cuts: bool = False
 
 
 class Project(BaseModel):

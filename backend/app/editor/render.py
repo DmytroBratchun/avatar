@@ -494,24 +494,25 @@ def render_preview(project: Project, slot_index: int, fmt: str | None = None) ->
     return out
 
 
-def _audio_with_quotes(narration: str, interruptions: list[tuple[float, Quote, int]]) -> tuple[list[str], str]:
+def _audio_with_quotes(narration: str, interruptions: list[tuple[float, Candidate, int]]) -> tuple[list[str], str]:
     """ffmpeg inputs and filter graph for the soundtrack: the narration, cut at each
-    interruption, with the quote's own sound spliced in. Input 0 is the video, 1 the
-    narration, 2.. the quote sources."""
+    interruption, with the quote clip's own sound spliced in. Input 0 is the video, 1
+    the narration, 2.. the quote sources. A quote cut from several pieces is several
+    interruptions at the same spot."""
     common = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
     inputs = ["-i", narration]
     pieces = len(interruptions) + 1
     graph = [f"[1:a]{common},asplit={pieces}" + "".join(f"[s{i}]" for i in range(pieces))]
     order: list[str] = []
     previous = 0.0
-    for i, (cut, quote, frames) in enumerate(interruptions):
+    for i, (cut, clip, frames) in enumerate(interruptions):
         if cut > previous:
             graph.append(f"[s{i}]atrim=start={previous:.6f}:end={cut:.6f},asetpts=PTS-STARTPTS[n{i}]")
             order.append(f"[n{i}]")
         else:
             graph.append(f"[s{i}]anullsink")  # two quotes at the same spot: no narration between them
         length = frames / FPS
-        inputs += ["-ss", f"{quote.clip_start:.3f}", "-t", f"{length + 0.5:.3f}", "-i", quote.file_path]
+        inputs += ["-ss", f"{clip.clip_start:.3f}", "-t", f"{length + 0.5:.3f}", "-i", clip.file_path]
         # padded/trimmed to exactly the quote's video length; short fades avoid clicks at the cuts
         graph.append(
             f"[{i + 2}:a:0]{common},apad,atrim=end={length:.6f},asetpts=PTS-STARTPTS,"
@@ -567,14 +568,15 @@ def render_project(project_id: str, report) -> None:
     def add_quotes(index: int) -> None:
         nonlocal position
         for quote in quotes_after.get(index, []):
-            frames = max(1, round((quote.clip_end - quote.clip_start) * FPS))
-            clip = Candidate(
-                scene_id=0, source_id=quote.source_id, file_path=quote.file_path,
-                scene_start=quote.clip_start, scene_end=quote.clip_end,
-                clip_start=quote.clip_start, clip_end=quote.clip_end, score=0.0,
-            )
-            items.append((clip, frames, quote, index))
-            position += frames
+            # a quote cut together from pieces is one clip per piece, back to back
+            for start, end in quote.spans():
+                frames = max(1, round((end - start) * FPS))
+                clip = Candidate(
+                    scene_id=0, source_id=quote.source_id, file_path=quote.file_path,
+                    scene_start=start, scene_end=end, clip_start=start, clip_end=end, score=0.0,
+                )
+                items.append((clip, frames, quote, index))
+                position += frames
 
     add_quotes(-1)
     for index, beat in enumerate(project.beats):
@@ -647,8 +649,8 @@ def render_project(project_id: str, report) -> None:
             stale.unlink(missing_ok=True)
 
     ordered: list[Path] = []
-    # (narration time where the narration is interrupted, quote, its length in frames)
-    interruptions: list[tuple[float, Quote, int]] = []
+    # (narration time where the narration is interrupted, quote clip, its length in frames)
+    interruptions: list[tuple[float, Candidate, int]] = []
     position = 0
     for candidate, frames, quote, index in items:
         args, identity = _segment_args(
@@ -664,7 +666,7 @@ def render_project(project_id: str, report) -> None:
         if quote is not None:
             # cut the narration on the same frame the video cuts on, so nothing drifts
             cut = 0.0 if index < 0 else round(project.beats[index].end * FPS) / FPS
-            interruptions.append((cut, quote, frames))
+            interruptions.append((cut, candidate, frames))
         position += frames
 
     run_jobs("rendering clips")

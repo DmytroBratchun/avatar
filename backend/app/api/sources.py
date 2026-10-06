@@ -9,6 +9,16 @@ from app.db.session import get_db
 from app.pipeline.runner import dequeue_source
 from app.schemas.scenes import ScanFolderIn, ScanFolderResult, SourceCreateIn, SourceOut, SourceUpdateIn
 from app.services.episode_parser import find_video_files, parse_episode_info
+from app.services.runtime_settings import caption_only_undescribed
+
+
+def _to_caption():
+    """SQL condition: the scene is one the captioning worker would still caption -
+    not captioned yet and, in gaps-only mode, not described by the fan wiki."""
+    condition = Scene.caption_status != "done"
+    if caption_only_undescribed():
+        condition = condition & Scene.wiki_description.is_(None)
+    return condition
 
 router = APIRouter(prefix="/api/sources", tags=["sources"])
 
@@ -76,11 +86,12 @@ def scan_folder(payload: ScanFolderIn, db: Session = Depends(get_db)) -> ScanFol
 
 
 def _with_counts(db: Session, source: Source) -> SourceOut:
-    total, text_n, visual_n = db.execute(
+    total, text_n, visual_n, to_caption = db.execute(
         select(
             func.count(Scene.id),
             func.sum(case((Scene.text_embedding_model.isnot(None), 1), else_=0)),
             func.sum(case((Scene.visual_embedding_model.isnot(None), 1), else_=0)),
+            func.sum(case((_to_caption(), 1), else_=0)),
         ).where(Scene.source_id == source.id)
     ).one()
     chunk_total, chunk_indexed = db.execute(
@@ -94,6 +105,7 @@ def _with_counts(db: Session, source: Source) -> SourceOut:
             "scene_count": total or 0,
             "text_indexed_count": text_n or 0,
             "visual_indexed_count": visual_n or 0,
+            "to_caption_count": to_caption or 0,
             "chunk_count": chunk_total or 0,
             "chunk_indexed_count": chunk_indexed or 0,
         }
@@ -107,13 +119,14 @@ def list_sources(db: Session = Depends(get_db)) -> list[SourceOut]:
     )
 
     counts_by_source = {
-        row[0]: (row[1], row[2] or 0, row[3] or 0)
+        row[0]: (row[1], row[2] or 0, row[3] or 0, row[4] or 0)
         for row in db.execute(
             select(
                 Scene.source_id,
                 func.count(Scene.id),
                 func.sum(case((Scene.text_embedding_model.isnot(None), 1), else_=0)),
                 func.sum(case((Scene.visual_embedding_model.isnot(None), 1), else_=0)),
+                func.sum(case((_to_caption(), 1), else_=0)),
             ).group_by(Scene.source_id)
         ).all()
     }
@@ -130,7 +143,7 @@ def list_sources(db: Session = Depends(get_db)) -> list[SourceOut]:
 
     result = []
     for source in sources:
-        total, text_n, visual_n = counts_by_source.get(source.id, (0, 0, 0))
+        total, text_n, visual_n, to_caption = counts_by_source.get(source.id, (0, 0, 0, 0))
         chunk_total, chunk_indexed = chunk_counts_by_source.get(source.id, (0, 0))
         result.append(
             SourceOut.model_validate(source, from_attributes=True).model_copy(
@@ -138,6 +151,7 @@ def list_sources(db: Session = Depends(get_db)) -> list[SourceOut]:
                     "scene_count": total,
                     "text_indexed_count": text_n,
                     "visual_indexed_count": visual_n,
+                    "to_caption_count": to_caption,
                     "chunk_count": chunk_total,
                     "chunk_indexed_count": chunk_indexed,
                 }

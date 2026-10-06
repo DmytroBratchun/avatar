@@ -17,6 +17,7 @@ export interface SourceOut {
   indexed_at: string | null;
   scene_count: number;
   text_indexed_count: number;
+  to_caption_count: number;
   visual_indexed_count: number;
   visual_reindex_requested: boolean;
   text_reindex_requested: boolean;
@@ -45,6 +46,10 @@ export interface IndexStatsOut {
   caption_error: number;
   text_indexed: number;
   visual_indexed: number;
+  wiki_indexed: number;
+  described: number;
+  in_both_text_indexes: number;
+  caption_only_undescribed: boolean;
   transcript_lines: number;
   visual_reindex_queue: number;
   text_reindex_queue: number;
@@ -281,9 +286,21 @@ export interface EditorQuote {
   episode_number: number | null;
   clip_start: number;
   clip_end: number;
+  // pieces that play back to back when the quote is cut together; empty = one continuous clip
+  parts: { start: number; end: number; text: string }[];
   text: string;
   speaker: string;
   reason: string;
+}
+
+/** The stretches of the episode a quote plays, in order. */
+export function quoteSpans(quote: EditorQuote): { start: number; end: number; text: string }[] {
+  return quote.parts.length > 0 ? quote.parts : [{ start: quote.clip_start, end: quote.clip_end, text: quote.text }];
+}
+
+/** How long a quote plays: its pieces added up. */
+export function quoteSeconds(quote: EditorQuote): number {
+  return quoteSpans(quote).reduce((sum, part) => sum + (part.end - part.start), 0);
 }
 
 // the three kinds of footage the Look tab styles separately
@@ -326,6 +343,7 @@ export interface EditorProject {
     wide_full_screen: boolean;
     wide_fill: number;
     background_speed: number;
+    quote_cuts: boolean;
   };
   word_count: number;
   timeline: EditorSegment[];
@@ -480,6 +498,7 @@ export const api = {
       background_speed?: number;
       wide_full_screen?: boolean;
       wide_fill?: number;
+      quote_cuts?: boolean;
     }
   ) => request<EditorProject>(`/api/editor/projects/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   // raw body upload - the backend has no multipart parser
@@ -516,7 +535,7 @@ export const api = {
   updateEditorQuote: (
     id: string,
     quoteId: string,
-    payload: { status?: string; after_word?: number; clip_start?: number; clip_end?: number }
+    payload: { status?: string; after_word?: number; clip_start?: number; clip_end?: number; drop_part?: number }
   ) =>
     request<EditorProject>(`/api/editor/projects/${id}/quotes/${quoteId}`, {
       method: "PATCH",
