@@ -10,6 +10,8 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const [model, setModel] = useState("claude-sonnet-5");
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
+  const [lumeanKey, setLumeanKey] = useState("");
+  const [showLumeanKey, setShowLumeanKey] = useState(false);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
@@ -17,6 +19,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
       setProvider(settings.caption_provider as "claude_code" | "api" | "local");
       setModel(settings.caption_model);
       setApiKey(settings.anthropic_api_key_from_env ? "" : settings.anthropic_api_key);
+      setLumeanKey(settings.lumean_api_key);
     }
   }, [settings]);
 
@@ -30,7 +33,8 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   }
 
   const saveMutation = useMutation({
-    mutationFn: () => api.updateSettings({ caption_provider: provider, caption_model: model, anthropic_api_key: apiKey }),
+    mutationFn: () =>
+      api.updateSettings({ caption_provider: provider, caption_model: model, anthropic_api_key: apiKey, lumean_api_key: lumeanKey.trim() }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["config"] });
@@ -114,6 +118,26 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                 </p>
               </>
             )}
+
+            <label style={{ marginTop: "0.75rem" }}>Lumean API key</label>
+            <div style={{ display: "flex", gap: "0.4rem" }}>
+              <input
+                type={showLumeanKey ? "text" : "password"}
+                style={{ flex: 1 }}
+                placeholder="for the video editor's voice-over"
+                value={lumeanKey}
+                onChange={(e) => setLumeanKey(e.target.value)}
+                spellCheck={false}
+              />
+              <button type="button" className="ghost small" onClick={() => setShowLumeanKey((v) => !v)}>
+                {showLumeanKey ? "hide" : "show"}
+              </button>
+            </div>
+            <p className="hint" style={{ marginTop: "0.4rem" }}>
+              Voices a video's script (the Voice tab of a video). The key needs the rights orders.read, orders.write,
+              orders.download, templates.read, templates.write, voices.read and billing.read. Stored locally in{" "}
+              <code>backend/data/settings.json</code>.
+            </p>
 
             <div style={{ marginTop: "0.75rem", display: "flex", gap: "0.5rem", alignItems: "center" }}>
               <button className="primary" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>

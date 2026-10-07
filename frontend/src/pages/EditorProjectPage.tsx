@@ -4,10 +4,12 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import type { EditorBeat, EditorJob, EditorProject, EditorStage, LookFormat } from "../api/client";
 import LookPreview from "../components/LookPreview";
+import MusicCard from "../components/MusicCard";
 import QuoteBankCard from "../components/QuoteBankCard";
 import QuotesCard, { AddQuoteCard } from "../components/QuotesCard";
 import RenderSettingsCard from "../components/RenderSettingsCard";
 import { SlotEditor, SlotThumb } from "../components/SlotEditor";
+import VoiceoverCard from "../components/VoiceoverCard";
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -248,7 +250,7 @@ function BeatRow({
   );
 }
 
-const TABS = ["pipeline", "quotes", "clips", "look", "video"] as const;
+const TABS = ["pipeline", "voice", "quotes", "clips", "music", "look", "video"] as const;
 type Tab = (typeof TABS)[number];
 
 export default function EditorProjectPage() {
@@ -337,6 +339,19 @@ export default function EditorProjectPage() {
   const beatsWithBackground = project.beats.filter((b) => b.backgrounds.length > 0).length;
 
   const approvedQuotes = project.quotes.filter((q) => q.status === "approved").length;
+  // music is planned over whole beats; beats built again leave it pointing at times that are gone
+  const musicStale =
+    project.music.length > 0 &&
+    project.music.some((block) => {
+      const first = project.beats.find((b) => b.id === block.beat_first);
+      const last = project.beats.find((b) => b.id === block.beat_last);
+      return !first || !last || Math.abs(first.start - block.start) > 0.01 || Math.abs(last.end - block.end) > 0.01;
+    });
+  // a block is filled when its tracks, overlapping by 3s, last as long as it does
+  const musicFilled = project.music.filter((block) => {
+    const tracks = block.tracks.filter((t) => t.enabled && t.end - t.start > 6);
+    return tracks.reduce((sum, t) => sum + (t.end - t.start), 0) - 3 * Math.max(0, tracks.length - 1) >= block.end - block.start + 3;
+  }).length;
   // a beat whose number of clips no longer matches the limit was split under an older setting
   const clipsStale = project.beats.some(
     (b) => b.slots.length > 0 && b.slots.length !== Math.max(1, Math.ceil((b.end - b.start) / project.settings.max_clip_seconds - 1e-6))
@@ -395,6 +410,18 @@ export default function EditorProjectPage() {
         ]
       : []),
     {
+      key: "music",
+      label: "Music",
+      description: "Music under the narration: one Claude call divides it into moods, then tracks are composed for each through Lumean. Optional.",
+      state: musicStale
+        ? "planned for other beats - run again"
+        : project.music.length > 0
+          ? `${musicFilled} / ${project.music.length} blocks`
+          : "not run - optional",
+      done: project.music.length > 0 && !musicStale && musicFilled === project.music.length,
+      ready: project.beats.length > 0,
+    },
+    {
       key: "render",
       label: "Render",
       description: "Builds the video. Free, local; only clips that changed are re-encoded.",
@@ -405,8 +432,10 @@ export default function EditorProjectPage() {
   ];
   const tabs: { key: Tab; label: string }[] = [
     { key: "pipeline", label: "Pipeline" },
+    { key: "voice", label: "Voice" },
     { key: "quotes", label: project.quotes.length > 0 ? `Quotes ${approvedQuotes}/${project.quotes.length}` : "Quotes" },
     { key: "clips", label: slots.length > 0 ? `Clips ${slotsFilled}/${slots.length}` : "Clips" },
+    { key: "music", label: "Music" },
     { key: "look", label: "Look" },
     { key: "video", label: "Video" },
   ];
@@ -446,7 +475,7 @@ export default function EditorProjectPage() {
       </div>
 
       {/* what is running or went wrong is shown on every tab */}
-      {tab !== "pipeline" && running && (
+      {(tab !== "pipeline" || project.job?.stage === "voiceover") && running && (
         <p style={{ margin: "0 0 0.75rem", display: "flex", alignItems: "center", gap: "0.45rem", flexWrap: "wrap" }}>
           <span className="spinner" />
           <span className="badge accent">{project.job?.stage} running</span>
@@ -462,7 +491,7 @@ export default function EditorProjectPage() {
           </span>
         </p>
       )}
-      {tab !== "pipeline" && project.job?.status === "error" && (
+      {(tab !== "pipeline" || project.job?.stage === "voiceover") && project.job?.status === "error" && (
         <p className="error-text" style={{ margin: "0 0 0.75rem" }}>
           {project.job.stage} failed: {project.job.error}
         </p>
@@ -544,6 +573,12 @@ export default function EditorProjectPage() {
           </div>
         </>
       )}
+
+      {tab === "music" && (
+        <MusicCard project={project} disabled={busy} stale={musicStale} onChange={setProject} onRun={() => runMutation.mutate("music")} />
+      )}
+
+      {tab === "voice" && <VoiceoverCard project={project} disabled={busy} onChange={setProject} />}
 
       {tab === "quotes" && (
         <>

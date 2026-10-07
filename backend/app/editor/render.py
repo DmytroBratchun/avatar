@@ -6,6 +6,7 @@ setting, only re-encodes what actually changed. The segments are then joined
 without re-encoding and the narration is muxed in.
 """
 
+import datetime as dt
 import hashlib
 import json
 import re
@@ -283,12 +284,26 @@ def _segment_args(
     # Timestamps are reset to zero on every stream: after a seek the first frame of an
     # input carries a small offset, and overlay would show the first output frame
     # without whichever layer starts a few milliseconds late.
-    base = f"fps={FPS_NUM}/{FPS_DEN},setpts=PTS-STARTPTS,crop={cw}:{ch}:{cx}:{cy},setsar=1"
-    seek = ["-ss", f"{candidate.clip_start:.3f}", "-i", candidate.file_path]
+    # A still picture at either end: the file is read from after hold_start to before
+    # hold_end, and its first and last frames are repeated to fill the clip.
+    held_start = round(candidate.hold_start * FPS)
+    held_end = round(candidate.hold_end * FPS)
+    if held_start + held_end >= frames:
+        held_start = held_end = 0
+    hold = ""
+    if held_start or held_end:
+        hold = (
+            f"trim=end_frame={frames - held_start - held_end},"
+            f"tpad=start_mode=clone:start={held_start}:stop_mode=clone:stop={held_end},"
+        )
+    base = f"fps={FPS_NUM}/{FPS_DEN},{hold}setpts=PTS-STARTPTS,crop={cw}:{ch}:{cx}:{cy},setsar=1"
+    seek = ["-ss", f"{candidate.clip_start + held_start / FPS:.3f}", "-i", candidate.file_path]
     identity = {
         "file": candidate.file_path, "start": candidate.clip_start, "frames": frames,
         "crop": [cw, ch, cx, cy], "layout": settings.layout, "v": ENCODE_VERSION,
     }
+    if hold:
+        identity["hold"] = [held_start, held_end]
 
     # A widescreen source (Korra) already fills a 16:9 screen and is sharp enough to,
     # so in a framed video it is shown full screen rather than cropped into the 4:3
@@ -494,35 +509,87 @@ def render_preview(project: Project, slot_index: int, fmt: str | None = None) ->
     return out
 
 
-def _audio_with_quotes(narration: str, interruptions: list[tuple[float, Candidate, int]]) -> tuple[list[str], str]:
+def _quote_holds(db, source_id: int, start: float, end: float) -> tuple[float, float]:
+    """How long the picture of a quote should stand still at its start and at its
+    end. A quote is cut by its words, and a line often begins a moment before the
+    shot changes or ends a moment after: the clip then opens or closes on a few
+    frames of another shot, which reads as a flash. Those frames are replaced by
+    holding the first frame after the cut (the last one before it, at the end) -
+    the sound is left alone, so no word is lost."""
+    from app.editor.footage import MIN_FRAGMENT_SECONDS, _cuts
+
+    frame = 1 / FPS
+    cuts = _cuts(db, source_id, start, end)
+    opening = [cut for cut in cuts if frame < cut - start < MIN_FRAGMENT_SECONDS]
+    closing = [cut for cut in cuts if frame < end - cut < MIN_FRAGMENT_SECONDS]
+    # one frame past the cut: shot detection can be a frame out
+    hold_start = max(opening) + frame - start if opening else 0.0
+    hold_end = end - (min(closing) - frame) if closing else 0.0
+    if hold_start + hold_end > (end - start) / 2:
+        return 0.0, 0.0  # a clip this short is mostly its neighbours; leave it as it is
+    return round(hold_start, 3), round(hold_end, 3)
+
+
+# how long the music takes to fade away before a quote and to come back after it
+MUSIC_DIP = 0.6
+
+
+def _soundtrack(
+    narration: str, interruptions: list[tuple[float, Candidate, int]], music: str | None = None,
+    narration_seconds: float = 0.0,
+) -> tuple[list[str], str]:
     """ffmpeg inputs and filter graph for the soundtrack: the narration, cut at each
     interruption, with the quote clip's own sound spliced in. Input 0 is the video, 1
-    the narration, 2.. the quote sources. A quote cut from several pieces is several
-    interruptions at the same spot."""
+    the narration, then the music track if there is one, then the quote sources. A
+    quote cut from several pieces is several interruptions at the same spot.
+
+    The music runs on the narration's clock and is mixed into the narration only: it
+    fades away before a quote, which has the show's own music, and comes back after."""
     common = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo"
-    inputs = ["-i", narration]
+    inputs = ["-i", narration] + (["-i", music] if music else [])
+    first_quote = 3 if music else 2
     pieces = len(interruptions) + 1
     graph = [f"[1:a]{common},asplit={pieces}" + "".join(f"[s{i}]" for i in range(pieces))]
+    if music:
+        # padded with silence so it can never end before the narration does - to a fixed
+        # length: padding without end leaves ffmpeg unable to finish the pieces it drops
+        graph.append(
+            f"[2:a]{common},apad=whole_dur={narration_seconds + 5:.3f},asplit={pieces}"
+            + "".join(f"[m{i}]" for i in range(pieces))
+        )
+
+    def piece(i: int, start: float, end: float | None) -> str:
+        """The narration from start to end (None = to its end), with its music."""
+        trim = f"atrim=start={start:.6f}" + (f":end={end:.6f}" if end is not None else "") + ",asetpts=PTS-STARTPTS"
+        graph.append(f"[s{i}]{trim}[n{i}]")
+        if not music:
+            return f"[n{i}]"
+        fades = f",afade=t=in:d={MUSIC_DIP}" if i > 0 else ""
+        if end is not None:
+            fades += f",afade=t=out:st={max(0.0, end - start - MUSIC_DIP):.6f}:d={MUSIC_DIP}"
+        graph.append(f"[m{i}]{trim}{fades}[mm{i}]")
+        graph.append(f"[n{i}][mm{i}]amix=inputs=2:duration=first:normalize=0[p{i}]")
+        return f"[p{i}]"
+
     order: list[str] = []
     previous = 0.0
     for i, (cut, clip, frames) in enumerate(interruptions):
         if cut > previous:
-            graph.append(f"[s{i}]atrim=start={previous:.6f}:end={cut:.6f},asetpts=PTS-STARTPTS[n{i}]")
-            order.append(f"[n{i}]")
+            order.append(piece(i, previous, cut))
         else:
             graph.append(f"[s{i}]anullsink")  # two quotes at the same spot: no narration between them
+            if music:
+                graph.append(f"[m{i}]anullsink")
         length = frames / FPS
         inputs += ["-ss", f"{clip.clip_start:.3f}", "-t", f"{length + 0.5:.3f}", "-i", clip.file_path]
         # padded/trimmed to exactly the quote's video length; short fades avoid clicks at the cuts
         graph.append(
-            f"[{i + 2}:a:0]{common},apad,atrim=end={length:.6f},asetpts=PTS-STARTPTS,"
+            f"[{i + first_quote}:a:0]{common},apad,atrim=end={length:.6f},asetpts=PTS-STARTPTS,"
             f"afade=t=in:d=0.05,afade=t=out:st={max(0.0, length - 0.08):.6f}:d=0.08[q{i}]"
         )
         order.append(f"[q{i}]")
         previous = cut
-    last = len(interruptions)
-    graph.append(f"[s{last}]atrim=start={previous:.6f},asetpts=PTS-STARTPTS[n{last}]")
-    order.append(f"[n{last}]")
+    order.append(piece(len(interruptions), previous, None))
     graph.append("".join(order) + f"concat=n={len(order)}:v=0:a=1[a]")
     return inputs, ";".join(graph)
 
@@ -571,23 +638,31 @@ def render_project(project_id: str, report) -> None:
             # a quote cut together from pieces is one clip per piece, back to back
             for start, end in quote.spans():
                 frames = max(1, round((end - start) * FPS))
+                hold_start, hold_end = _quote_holds(db, quote.source_id, start, end)
                 clip = Candidate(
                     scene_id=0, source_id=quote.source_id, file_path=quote.file_path,
                     scene_start=start, scene_end=end, clip_start=start, clip_end=end, score=0.0,
+                    hold_start=hold_start, hold_end=hold_end,
                 )
                 items.append((clip, frames, quote, index))
                 position += frames
 
-    add_quotes(-1)
-    for index, beat in enumerate(project.beats):
-        beat_start = 0 if index == 0 else position
-        for slot in beat.slots:
-            candidate = slot.candidates[slot.selected] if slot.selected is not None else None
-            frames = _frame_count(slot.start, slot.end)
-            items.append((candidate, frames, None, index))
-            position += frames
-        add_quotes(index)
-        ranges.append((beat_start, position))
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()  # read only: where the shots of a quote's episode change
+    try:
+        add_quotes(-1)
+        for index, beat in enumerate(project.beats):
+            beat_start = 0 if index == 0 else position
+            for slot in beat.slots:
+                candidate = slot.candidates[slot.selected] if slot.selected is not None else None
+                frames = _frame_count(slot.start, slot.end)
+                items.append((candidate, frames, None, index))
+                position += frames
+            add_quotes(index)
+            ranges.append((beat_start, position))
+    finally:
+        db.close()
     total_frames = position
 
     jobs: list[tuple[Path, list[str]]] = []
@@ -677,10 +752,19 @@ def render_project(project_id: str, report) -> None:
     output = output_dir / "video.mp4"
     partial = output_dir / "video.part.mp4"
     narration = str(folder / project.audio_file)
-    if not interruptions:
+    music_track = None
+    if project.settings.music_enabled and project.music:
+        from app.editor.music import build_track
+
+        report("mixing the music")
+        music_track = build_track(project, folder)
+        report("joining clips with the narration")
+    if not interruptions and music_track is None:
         audio_inputs, audio_map = ["-i", narration], ["-map", "1:a"]
     else:
-        audio_inputs, graph = _audio_with_quotes(narration, interruptions)
+        audio_inputs, graph = _soundtrack(
+            narration, interruptions, str(music_track) if music_track else None, project.audio_duration or 0.0
+        )
         audio_map = ["-filter_complex", graph, "-map", "[a]"]
     _run([
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
@@ -691,14 +775,26 @@ def render_project(project_id: str, report) -> None:
         "-map_chapters", "-1", "-map_metadata", "-1",
         "-movflags", "+faststart", str(partial),
     ])
-    partial.replace(output)
+    # The previous render may still be open - in a player, or streamed to the browser
+    # tab that watched it - and Windows won't replace an open file. The new video then
+    # gets a name of its own rather than the render failing after all the encoding.
+    try:
+        partial.replace(output)
+    except PermissionError:
+        output = output_dir / f"video_{dt.datetime.now():%Y%m%d_%H%M%S}.mp4"
+        partial.replace(output)
+    for stale in set(output_dir.glob("video*.mp4")) - {output}:
+        try:
+            stale.unlink()
+        except OSError:
+            pass  # still open; the next render tries again
 
     # segments no current slot uses are leftovers from earlier choices
     for stale in set(segments_dir.glob("*.mp4")) - set(ordered):
         stale.unlink(missing_ok=True)
 
     def apply(p: Project) -> None:
-        p.output_file = "output/video.mp4"
+        p.output_file = f"output/{output.name}"
         p.rendered_at = store.now()
 
     store.update_project(project_id, apply)

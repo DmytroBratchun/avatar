@@ -6,9 +6,15 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from app.editor import jobs, store
+from app.editor import jobs, store, voiceover
 from app.editor.store import Project, Word
-from app.services.runtime_settings import editor_projects_root, set_editor_default_look, set_editor_projects_root
+from app.services.lumean import Lumean, LumeanError
+from app.services.runtime_settings import (
+    current_lumean_api_key,
+    editor_projects_root,
+    set_editor_default_look,
+    set_editor_projects_root,
+)
 
 router = APIRouter(prefix="/api/editor", tags=["editor"])
 
@@ -51,6 +57,8 @@ class ProjectUpdateIn(BaseModel):
     background_speed: float | None = None
     wide_full_screen: bool | None = None
     quote_cuts: bool | None = None
+    music_enabled: bool | None = None
+    music_level: float | None = None
 
 
 def _load(project_id: str) -> Project:
@@ -151,6 +159,10 @@ def update_project(project_id: str, payload: ProjectUpdateIn) -> Project:
             p.settings.wide_full_screen = data["wide_full_screen"]
         if data.get("quote_cuts") is not None:
             p.settings.quote_cuts = data["quote_cuts"]
+        if data.get("music_enabled") is not None:
+            p.settings.music_enabled = data["music_enabled"]
+        if data.get("music_level") is not None:
+            p.settings.music_level = min(40.0, max(6.0, data["music_level"]))
 
     return store.update_project(project_id, apply)
 
@@ -233,11 +245,16 @@ def run_stage(project_id: str, stage: str) -> Project:
     # A stage queued behind others can't be checked yet - what it needs may be exactly
     # what the stages ahead of it produce. It checks for itself when its turn comes.
     if not jobs.is_busy(project_id):
+        if stage == "voiceover":
+            # it can place a paid order, so it is only started from the Voice tab
+            raise HTTPException(400, "Start the voice-over from the Voice tab")
         if stage == "transcribe" and not project.audio_file:
             raise HTTPException(400, "Upload the narration audio first")
         if stage in ("beats", "quotes") and project.word_count == 0:
             raise HTTPException(400, "Transcribe the audio first")
-        if stage in ("queries", "background") and not project.beats:
+        if stage == "music" and not current_lumean_api_key():
+            raise HTTPException(400, "Add the Lumean API key in Settings first")
+        if stage in ("queries", "background", "music") and not project.beats:
             raise HTTPException(400, "Build beats first")
         if stage == "render" and not any(slot.selected is not None for b in project.beats for slot in b.slots):
             raise HTTPException(400, "Find footage first")
@@ -254,6 +271,225 @@ def unqueue_stage(project_id: str, stage: str) -> Project:
     """Takes a waiting stage off the project's queue (the running one is not affected)."""
     _load(project_id)
     return jobs.unqueue(project_id, stage)
+
+
+# --- voice-over ---------------------------------------------------------------
+
+
+class VoiceoverOut(BaseModel):
+    has_key: bool
+    state: voiceover.Voiceover
+    # the script changed since it was sent, so the audio no longer matches it
+    script_changed: bool
+
+
+class FragmentRedoIn(BaseModel):
+    text: str | None = None
+
+
+def _voiceover(project: Project) -> VoiceoverOut:
+    state = voiceover.load(project.id)
+    script = (project.script_text or "").strip()
+    return VoiceoverOut(
+        has_key=bool(current_lumean_api_key()),
+        state=state,
+        script_changed=bool(state.order_id and state.order_text is not None and state.order_text != script),
+    )
+
+
+def _lumean(call):
+    """Runs a call that talks to Lumean, turning its refusals into API errors."""
+    try:
+        return call()
+    except LumeanError as exc:
+        raise HTTPException(502 if exc.status is None or exc.status >= 500 else 400, str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc))
+
+
+def _idle(project_id: str) -> Project:
+    project = _load(project_id)
+    if project.job and project.job.status == "running":
+        raise HTTPException(409, "A stage is running - wait for it to finish")
+    return project
+
+
+@router.get("/projects/{project_id}/voiceover", response_model=VoiceoverOut)
+def get_voiceover(project_id: str) -> VoiceoverOut:
+    return _voiceover(_load(project_id))
+
+
+@router.put("/projects/{project_id}/voiceover/settings", response_model=VoiceoverOut)
+def set_voiceover_settings(project_id: str, payload: voiceover.VoiceSettings) -> VoiceoverOut:
+    """Voice and model for the next voice-over. Fragments voiced again later in the
+    current one keep the settings it was ordered with."""
+    project = _idle(project_id)
+    state = voiceover.load(project_id)
+    state.settings = payload
+    voiceover.save(project_id, state)
+    return _voiceover(project)
+
+
+@router.get("/voiceover/voices")
+def list_voices(search: str = "", page: int = 0, gender: str = "", language: str = "") -> dict:
+    """A page of the ElevenLabs voice library (pages count from 0)."""
+    return _lumean(
+        lambda: Lumean().elevenlabs_voices(
+            search=search.strip(), page=max(0, page), gender=gender, required_languages=language
+        )
+    )
+
+
+@router.get("/voiceover/own-voices")
+def list_own_voices() -> list[dict]:
+    """Voices already set up as templates in the Lumean account, with their settings."""
+    return _lumean(voiceover.own_voices)
+
+
+@router.get("/projects/{project_id}/voiceover/estimate")
+def estimate_voiceover(project_id: str) -> dict:
+    """What voicing the script would cost; orders nothing."""
+    _idle(project_id)
+    return _lumean(lambda: voiceover.estimate(project_id))
+
+
+@router.post("/projects/{project_id}/voiceover/generate", response_model=Project)
+def generate_voiceover(project_id: str) -> Project:
+    """Sends the script to be voiced - a new, paid order, replacing the current one."""
+    project = _idle(project_id)
+    if not (project.script_text or "").strip():
+        raise HTTPException(400, "The project has no script to voice")
+    if not current_lumean_api_key():
+        raise HTTPException(400, "Add the Lumean API key in Settings first")
+    if not voiceover.load(project_id).settings.voice_id:
+        raise HTTPException(400, "Choose a voice first")
+    voiceover.start_new(project_id)
+    return jobs.start(project_id, "voiceover")
+
+
+@router.post("/projects/{project_id}/voiceover/sync", response_model=Project)
+def sync_voiceover(project_id: str) -> Project:
+    """Picks the current order up again: waits for it and fetches what changed. Free."""
+    _idle(project_id)
+    if not voiceover.load(project_id).order_id:
+        raise HTTPException(400, "There is no voice-over yet")
+    return jobs.start(project_id, "voiceover")
+
+
+@router.post("/projects/{project_id}/voiceover/fragments/{index}/redo", response_model=Project)
+def redo_voiceover_fragment(project_id: str, index: int, payload: FragmentRedoIn) -> Project:
+    """Voices one fragment again, optionally with other wording, then waits for it."""
+    _idle(project_id)
+    _lumean(lambda: voiceover.redo_fragment(project_id, index, payload.text))
+    return jobs.start(project_id, "voiceover")
+
+
+@router.post("/projects/{project_id}/voiceover/retry-failed", response_model=Project)
+def retry_failed_voiceover(project_id: str) -> Project:
+    """Voices every technically failed fragment again; the ones the content policy
+    rejected need other wording and are left alone."""
+    _idle(project_id)
+    _lumean(lambda: voiceover.retry_failed(project_id))
+    return jobs.start(project_id, "voiceover")
+
+
+@router.post("/projects/{project_id}/voiceover/use", response_model=Project)
+def use_voiceover(project_id: str) -> Project:
+    """Makes the finished voice-over the project's narration, discarding the
+    transcript, beats and quotes built on the previous one."""
+    _idle(project_id)
+    return _lumean(lambda: voiceover.use_as_narration(project_id))
+
+
+@router.get("/projects/{project_id}/voiceover/files/{name:path}")
+def get_voiceover_file(project_id: str, name: str):
+    _load(project_id)
+    base = voiceover.folder(project_id).resolve()
+    path = (base / name).resolve()
+    if base not in path.parents or not path.is_file():
+        raise HTTPException(404, "File not found")
+    return FileResponse(path)
+
+
+# --- music ---------------------------------------------------------------------
+
+
+class MusicBlockIn(BaseModel):
+    mood: str | None = None
+    prompt: str | None = None
+
+
+class MusicTrackIn(BaseModel):
+    enabled: bool
+
+
+def _music_block(project: Project, block_id: str):
+    block = next((b for b in project.music if b.id == block_id), None)
+    if block is None:
+        raise HTTPException(404, "No such block of music")
+    return block
+
+
+@router.patch("/projects/{project_id}/music/{block_id}", response_model=Project)
+def update_music_block(project_id: str, block_id: str, payload: MusicBlockIn) -> Project:
+    """Changes what a block's music is described as. Its tracks stay until new ones
+    are asked for."""
+    _music_block(_idle(project_id), block_id)
+
+    def apply(p: Project) -> None:
+        block = _music_block(p, block_id)
+        if payload.mood is not None:
+            block.mood = payload.mood.strip()
+        if payload.prompt is not None and payload.prompt.strip():
+            block.prompt = payload.prompt.strip()
+
+    return store.update_project(project_id, apply)
+
+
+@router.post("/projects/{project_id}/music/{block_id}/compose", response_model=Project)
+def recompose_music_block(project_id: str, block_id: str) -> Project:
+    """Throws a block's tracks away and composes new ones from its prompt."""
+    _music_block(_idle(project_id), block_id)
+    if not current_lumean_api_key():
+        raise HTTPException(400, "Add the Lumean API key in Settings first")
+    store.update_project(project_id, lambda p: setattr(_music_block(p, block_id), "tracks", []))
+    return jobs.start(project_id, "music")
+
+
+@router.patch("/projects/{project_id}/music/{block_id}/tracks/{track_id}", response_model=Project)
+def update_music_track(project_id: str, block_id: str, track_id: str, payload: MusicTrackIn) -> Project:
+    """Leaves a track out of the video, or puts it back. Running the music stage
+    afterwards composes a replacement if the block is no longer filled."""
+    _music_block(_idle(project_id), block_id)
+
+    def apply(p: Project) -> None:
+        for track in _music_block(p, block_id).tracks:
+            if track.id == track_id:
+                track.enabled = payload.enabled
+
+    return store.update_project(project_id, apply)
+
+
+@router.post("/projects/{project_id}/music/replan", response_model=Project)
+def replan_music(project_id: str) -> Project:
+    """Divides the narration into blocks again and composes everything anew."""
+    project = _idle(project_id)
+    if not project.beats:
+        raise HTTPException(400, "Build beats first")
+    if not current_lumean_api_key():
+        raise HTTPException(400, "Add the Lumean API key in Settings first")
+    store.update_project(project_id, lambda p: setattr(p, "music", []))
+    return jobs.start(project_id, "music")
+
+
+@router.get("/projects/{project_id}/music/files/{name}")
+def get_music_file(project_id: str, name: str):
+    _load(project_id)
+    base = (store.project_dir(project_id) / "music").resolve()
+    path = (base / name).resolve()
+    if path.parent != base or not path.is_file():
+        raise HTTPException(404, "File not found")
+    return FileResponse(path)
 
 
 class SlotUpdateIn(BaseModel):

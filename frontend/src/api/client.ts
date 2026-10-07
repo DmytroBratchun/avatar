@@ -103,6 +103,7 @@ export interface SettingsOut {
   caption_model_from_env: boolean;
   anthropic_api_key: string;
   anthropic_api_key_from_env: boolean;
+  lumean_api_key: string;
 }
 
 export interface SceneOut {
@@ -306,7 +307,97 @@ export function quoteSeconds(quote: EditorQuote): number {
 // the three kinds of footage the Look tab styles separately
 export type LookFormat = "4:3" | "16:9" | "wide";
 
-export type EditorStage = "transcribe" | "quotes" | "beats" | "queries" | "select" | "background" | "render";
+export type EditorStage = "voiceover" | "transcribe" | "quotes" | "beats" | "queries" | "select" | "background" | "music" | "render";
+
+/** A generated piece of music; only start..end of the file is played (it fades out after that). */
+export interface EditorMusicTrack {
+  id: string;
+  file: string;
+  duration: number;
+  start: number;
+  end: number;
+  loudness: number | null;
+  enabled: boolean;
+}
+
+/** A stretch of the narration with one mood, and the music composed for it. */
+export interface EditorMusicBlock {
+  id: string;
+  beat_first: string;
+  beat_last: string;
+  start: number;
+  end: number;
+  mood: string;
+  prompt: string;
+  tracks: EditorMusicTrack[];
+}
+
+// --- voice-over (the script voiced through Lumean) ---
+
+export interface VoiceSettings {
+  voice_id: string;
+  voice_name: string;
+  // set for a voice of ElevenLabs' public library: it is named together with its owner
+  public_owner_id: string;
+  model_id: string;
+  language_code: string;
+  stability: number;
+  similarity_boost: number;
+  style: number;
+  speed: number;
+  by_paragraph: boolean;
+}
+
+export interface VoiceFragment {
+  index: number;
+  root_id: string;
+  item_id: string;
+  status: "pending" | "processing" | "completed" | "policy_flagged" | "failed";
+  text: string;
+  // under the project's voiceover folder; null until it is voiced
+  file: string | null;
+  duration_ms: number | null;
+  versions: number;
+}
+
+export interface Voiceover {
+  has_key: boolean;
+  script_changed: boolean;
+  state: {
+    settings: VoiceSettings;
+    order_id: string | null;
+    order_status: string | null;
+    fragments: VoiceFragment[];
+    final_file: string | null;
+    final_version: string | null;
+    service_files: string[];
+    tokens_spent: number | null;
+    used_as_narration: string | null;
+  };
+}
+
+/** A voice of the ElevenLabs library, as Lumean passes it on. */
+export interface LumeanVoice {
+  voice_id: string;
+  public_owner_id?: string;
+  language?: string;
+  name?: string;
+  gender?: string;
+  age?: string;
+  accent?: string;
+  use_case?: string;
+  descriptive?: string;
+  preview_url?: string;
+}
+
+export interface VoiceEstimate {
+  ready: boolean;
+  characters: number;
+  fragments: number | null;
+  summary: Record<string, unknown>;
+  blocked_fragments: number[];
+  tokens_remaining: number | null;
+}
 
 export interface EditorJob {
   stage: string;
@@ -344,11 +435,14 @@ export interface EditorProject {
     wide_fill: number;
     background_speed: number;
     quote_cuts: boolean;
+    music_enabled: boolean;
+    music_level: number;
   };
   word_count: number;
   timeline: EditorSegment[];
   beats: EditorBeat[];
   quotes: EditorQuote[];
+  music: EditorMusicBlock[];
   llm_cost_usd: number;
   output_file: string | null;
   rendered_at: string | null;
@@ -441,7 +535,7 @@ export const api = {
   getLocalWorkerStatus: () => request<WorkerStatusOut>("/api/worker/local-status"),
 
   getSettings: () => request<SettingsOut>("/api/settings"),
-  updateSettings: (payload: { caption_provider?: string; caption_model?: string; anthropic_api_key?: string }) =>
+  updateSettings: (payload: { caption_provider?: string; caption_model?: string; anthropic_api_key?: string; lumean_api_key?: string }) =>
     request<SettingsOut>("/api/settings", { method: "PATCH", body: JSON.stringify(payload) }),
 
   search: (params: Record<string, QueryValue>) => request<SearchResult[]>(`/api/search${buildQuery(params)}`),
@@ -499,6 +593,8 @@ export const api = {
       wide_full_screen?: boolean;
       wide_fill?: number;
       quote_cuts?: boolean;
+      music_enabled?: boolean;
+      music_level?: number;
     }
   ) => request<EditorProject>(`/api/editor/projects/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   // raw body upload - the backend has no multipart parser
@@ -559,6 +655,33 @@ export const api = {
       `/api/editor/projects/${id}/preview-info`
     ),
   editorAudioUrl: (id: string) => `${BASE_URL}/api/editor/projects/${id}/audio`,
+
+  updateMusicBlock: (id: string, blockId: string, payload: { mood?: string; prompt?: string }) =>
+    request<EditorProject>(`/api/editor/projects/${id}/music/${blockId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  composeMusicBlock: (id: string, blockId: string) =>
+    request<EditorProject>(`/api/editor/projects/${id}/music/${blockId}/compose`, { method: "POST" }),
+  setMusicTrackEnabled: (id: string, blockId: string, trackId: string, enabled: boolean) =>
+    request<EditorProject>(`/api/editor/projects/${id}/music/${blockId}/tracks/${trackId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    }),
+  replanMusic: (id: string) => request<EditorProject>(`/api/editor/projects/${id}/music/replan`, { method: "POST" }),
+  musicFileUrl: (id: string, file: string) => `${BASE_URL}/api/editor/projects/${id}/music/files/${file}`,
+
+  getVoiceover: (id: string) => request<Voiceover>(`/api/editor/projects/${id}/voiceover`),
+  setVoiceSettings: (id: string, settings: VoiceSettings) =>
+    request<Voiceover>(`/api/editor/projects/${id}/voiceover/settings`, { method: "PUT", body: JSON.stringify(settings) }),
+  listOwnVoices: () => request<VoiceSettings[]>("/api/editor/voiceover/own-voices"),
+  listLumeanVoices: (params: { search?: string; page?: number; language?: string }) =>
+    request<{ voices: LumeanVoice[]; total?: number; page?: number; has_more?: boolean }>(`/api/editor/voiceover/voices${buildQuery(params)}`),
+  estimateVoiceover: (id: string) => request<VoiceEstimate>(`/api/editor/projects/${id}/voiceover/estimate`),
+  generateVoiceover: (id: string) => request<EditorProject>(`/api/editor/projects/${id}/voiceover/generate`, { method: "POST" }),
+  syncVoiceover: (id: string) => request<EditorProject>(`/api/editor/projects/${id}/voiceover/sync`, { method: "POST" }),
+  redoVoiceFragment: (id: string, index: number, text: string) =>
+    request<EditorProject>(`/api/editor/projects/${id}/voiceover/fragments/${index}/redo`, { method: "POST", body: JSON.stringify({ text }) }),
+  retryFailedVoiceover: (id: string) => request<EditorProject>(`/api/editor/projects/${id}/voiceover/retry-failed`, { method: "POST" }),
+  useVoiceover: (id: string) => request<EditorProject>(`/api/editor/projects/${id}/voiceover/use`, { method: "POST" }),
+  voiceoverFileUrl: (id: string, file: string) => `${BASE_URL}/api/editor/projects/${id}/voiceover/files/${file}`,
 
   streamUrl: (sourceId: number) => `${BASE_URL}/api/media/${sourceId}/stream`,
   keyframeUrl: (sceneId: number, index: number) => `${BASE_URL}/api/media/scenes/${sceneId}/keyframes/${index}`,

@@ -6,6 +6,8 @@ non-empty fields here override the env default; leave a field unset to fall back
 """
 
 import json
+import os
+import sys
 import threading
 from pathlib import Path
 
@@ -35,6 +37,7 @@ def get_effective_settings() -> dict:
         "caption_model_from_env": not raw.get("caption_model"),
         "anthropic_api_key": raw.get("anthropic_api_key") or settings.anthropic_api_key,
         "anthropic_api_key_from_env": not raw.get("anthropic_api_key") and bool(settings.anthropic_api_key),
+        "lumean_api_key": raw.get("lumean_api_key") or "",
     }
 
 
@@ -42,6 +45,7 @@ def update_settings(
     caption_provider: str | None = None,
     caption_model: str | None = None,
     anthropic_api_key: str | None = None,
+    lumean_api_key: str | None = None,
 ) -> None:
     """None field = leave unchanged. Empty string = clear the override (fall back to .env)."""
     with _lock:
@@ -50,6 +54,7 @@ def update_settings(
             ("caption_provider", caption_provider),
             ("caption_model", caption_model),
             ("anthropic_api_key", anthropic_api_key),
+            ("lumean_api_key", lumean_api_key),
         ):
             if value is None:
                 continue
@@ -117,3 +122,25 @@ def current_caption_model() -> str:
 def current_anthropic_api_key() -> str:
     raw = _read_raw()
     return raw.get("anthropic_api_key") or settings.anthropic_api_key
+
+
+def current_lumean_api_key() -> str:
+    """Key for the Lumean API, which voices the editor's narration (app/services/lumean.py):
+    the one saved in settings, else the LUMEAN_KEY environment variable."""
+    return (_read_raw().get("lumean_api_key") or "").strip() or _environment("LUMEAN_KEY")
+
+
+def _environment(name: str) -> str:
+    """An environment variable, also when it was set for the Windows user after this
+    process (or the terminal it was started from) began - those are read from the
+    registry, where Windows keeps them."""
+    value = os.environ.get(name, "").strip()
+    if value or sys.platform != "win32":
+        return value
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            return str(winreg.QueryValueEx(key, name)[0]).strip()
+    except OSError:
+        return ""

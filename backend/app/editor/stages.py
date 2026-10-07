@@ -11,6 +11,7 @@ from app.editor.llm import run_claude_json
 from app.editor.quotes import resolve_placement
 from app.editor.render import render_project
 from app.editor.store import Beat, Segment, Slot, Word
+from app.editor.voiceover import run_voiceover
 
 Report = Callable[[str], None]
 
@@ -496,12 +497,22 @@ def run_background(project_id: str, report: Report) -> None:
     store.update_project(project_id, apply)
 
 
+def run_music(project_id: str, report: Report) -> None:
+    """Music under the narration: one Claude call divides the beats into blocks of
+    one mood, then tracks are composed for every block through Lumean."""
+    from app.editor.music import compose
+
+    compose(project_id, report)
+
+
 STAGES: dict[str, Callable[[str, Report], None]] = {
+    "voiceover": run_voiceover,
     "transcribe": run_transcribe,
     "quotes": run_quotes,
     "beats": run_beats,
     "queries": run_queries,
     "select": run_select,
     "background": run_background,
+    "music": run_music,
     "render": render_project,
 }

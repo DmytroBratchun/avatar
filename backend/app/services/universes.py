@@ -35,6 +35,9 @@ class Universe(BaseModel):
     region_notes: str = ""
     # region -> what its scenery looks like, for choosing video backgrounds
     scenery: dict[str, str] = Field(default_factory=dict)
+    # what this world's music sounds like - instruments, traditions, character - for
+    # composing music under a video; empty = left to what the model knows of the shows
+    music_style: str = ""
     # MediaWiki API of a fan wiki with a "Transcript" namespace: episode transcripts
     # with speaker names and descriptions (see services/wiki_transcripts.py)
     transcripts_wiki: str | None = None

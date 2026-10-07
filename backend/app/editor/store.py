@@ -80,6 +80,11 @@ class Candidate(BaseModel):
     score: float
     # pieces of a shot too short to read (a flicker) that the clip would contain
     slivers: int = 0
+    # Seconds at the clip's start and end where the picture stands still instead of
+    # showing what the file has there - a quote's sound starts and stops with the
+    # words, which can leave a flash of the neighbouring shot (see render._quote_holds)
+    hold_start: float = 0.0
+    hold_end: float = 0.0
 
 
 class Slot(BaseModel):
@@ -123,6 +128,34 @@ class Beat(BaseModel):
     background_query: str = ""
     # scenery shots that play behind this beat, in order (framed layout)
     backgrounds: list[Background] = Field(default_factory=list)
+
+
+class MusicTrack(BaseModel):
+    """One generated piece of music. Generated tracks fade out towards the end (and
+    may start from silence), so only start..end of the file is played."""
+
+    id: str
+    file: str  # under <project>/music/
+    order_id: str = ""
+    duration: float
+    start: float = 0.0
+    end: float
+    loudness: float | None = None  # LUFS of start..end
+    enabled: bool = True  # unticked by the user: left out of the video
+
+
+class MusicBlock(BaseModel):
+    """A stretch of the narration with one mood, and the music composed for it.
+    Covers whole beats; times are on the narration clock."""
+
+    id: str
+    beat_first: str
+    beat_last: str
+    start: float
+    end: float
+    mood: str = ""
+    prompt: str = ""  # what the music generator is asked for
+    tracks: list[MusicTrack] = Field(default_factory=list)
 
 
 class QuotePart(BaseModel):
@@ -201,6 +234,10 @@ class RenderSettings(BaseModel):
     # Experimental, quotes stage: a proposed quote may be cut together from two or
     # three pieces of a longer speech or exchange instead of one continuous stretch.
     quote_cuts: bool = False
+    # music under the narration (the music stage): whether the video has it, and how
+    # much quieter than the voice it plays, in loudness units
+    music_enabled: bool = True
+    music_level: float = 18.0
 
 
 class Project(BaseModel):
@@ -221,6 +258,7 @@ class Project(BaseModel):
     timeline: list[Segment] = Field(default_factory=list)
     beats: list[Beat] = Field(default_factory=list)
     quotes: list[Quote] = Field(default_factory=list)
+    music: list[MusicBlock] = Field(default_factory=list)
     llm_cost_usd: float = 0.0
     output_file: str | None = None  # relative to the project folder
     rendered_at: str | None = None
