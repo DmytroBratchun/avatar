@@ -1,3 +1,4 @@
+from pathlib import Path
 import datetime as dt
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -172,6 +173,9 @@ def get_scene(scene_id: int, db: Session = Depends(get_db)) -> SceneDetailOut:
             **SceneOut.model_validate(scene, from_attributes=True).model_dump(),
             "transcript_lines": lines,
             "source_file_path": scene.source.file_path,
+            "source_file_exists": Path(scene.source.file_path).exists(),
+            "episode_title": scene.source.episode_title,
+            "page_count": len(scene.source.scenes) if scene.source.kind == "comic" else None,
             "technical": _technical(db, scene),
         }
     )

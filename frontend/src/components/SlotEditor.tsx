@@ -4,7 +4,16 @@ import { api } from "../api/client";
 import type { EditorCandidate, EditorProject, EditorSlot } from "../api/client";
 import ScenePicker from "./ScenePicker";
 
+// the picture that stands for a candidate: a photo's own file, else the scene's keyframe
+export function candidateImage(c: EditorCandidate, projectId: string): string {
+  return c.kind === "photo" && c.image_path ? api.editorPhotoUrl(projectId, c.image_path) : api.keyframeUrl(c.scene_id, 0);
+}
+
 function episodeLabel(c: EditorCandidate): string {
+  if (c.kind === "photo") return "Photo";
+  if (c.kind === "comic") {
+    return `${c.show_title ?? "Comic"}${c.episode_number != null ? ` ${c.episode_number}` : ""} p.${Math.round(c.scene_start) + 1}`;
+  }
   const m = Math.floor(c.clip_start / 60);
   const s = Math.floor(c.clip_start % 60);
   return `B${c.book ?? "?"}E${c.episode_number ?? "?"} ${m}:${s.toString().padStart(2, "0")}`;
@@ -20,10 +29,12 @@ function matchLabel(c: EditorCandidate): string {
 }
 
 export function SlotThumb({
+  projectId,
   slot,
   active,
   onClick,
 }: {
+  projectId: string;
   slot: EditorSlot;
   active: boolean;
   onClick: () => void;
@@ -44,7 +55,7 @@ export function SlotThumb({
     >
       {candidate ? (
         <img
-          src={api.keyframeUrl(candidate.scene_id, 0)}
+          src={candidateImage(candidate, projectId)}
           alt=""
           loading="lazy"
           style={{ width: "100%", aspectRatio: "4 / 3", objectFit: "cover", display: "block", borderRadius: "var(--radius-sm)" }}
@@ -121,7 +132,35 @@ export function SlotEditor({
   return (
     <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", padding: "0.5rem 0" }}>
       <div style={{ width: "360px", maxWidth: "100%" }}>
-        {selected ? (
+        {selected && selected.kind === "photo" ? (
+          <>
+            {/* a photo from Wikimedia Commons, for a shot about the real world */}
+            <img
+              key={selected.scene_id}
+              src={candidateImage(selected, projectId)}
+              alt=""
+              style={{ width: "100%", maxHeight: "520px", objectFit: "contain", background: "var(--bg-hover)" }}
+            />
+            <p className="hint" style={{ marginTop: "0.3rem" }}>
+              Photo for "{slot.photo_query}" · {(selected.clip_end - selected.clip_start).toFixed(1)}s
+            </p>
+            {selected.credit && <p style={{ fontSize: "0.8rem", margin: 0, wordBreak: "break-word" }}>{selected.credit}</p>}
+          </>
+        ) : selected && selected.kind === "comic" ? (
+          <>
+            {/* a comic page: shown whole here; in the video it scrolls from top to bottom */}
+            <img
+              key={selected.scene_id}
+              src={api.keyframeUrl(selected.scene_id, 0)}
+              alt=""
+              style={{ width: "100%", maxHeight: "520px", objectFit: "contain", background: "var(--bg-hover)" }}
+            />
+            <p className="hint" style={{ marginTop: "0.3rem" }}>
+              {episodeLabel(selected)} · comic page, scrolls for {(selected.clip_end - selected.clip_start).toFixed(1)}s · {matchLabel(selected)}
+            </p>
+            {selected.description && <p style={{ fontSize: "0.85rem", margin: 0 }}>{selected.description}</p>}
+          </>
+        ) : selected ? (
           <>
             {/* #t=start,end makes the browser play just this clip out of the episode */}
             <video
@@ -159,7 +198,7 @@ export function SlotEditor({
               }}
             >
               <img
-                src={api.keyframeUrl(c.scene_id, 0)}
+                src={candidateImage(c, projectId)}
                 alt=""
                 loading="lazy"
                 style={{ width: "100%", aspectRatio: "4 / 3", objectFit: "cover", display: "block", borderRadius: "var(--radius-sm)" }}
@@ -171,6 +210,11 @@ export function SlotEditor({
           ))}
         </div>
 
+        {slot.moment && (
+          <p className="hint" style={{ margin: "0.6rem 0 0" }} title="Found by reading the episodes it happens in, before any other shot is searched">
+            <span className="badge accent">specific moment</span> {slot.moment}
+          </p>
+        )}
         <label style={{ marginTop: "0.6rem", fontSize: "0.8rem" }}>What happens (searches scene descriptions)</label>
         <input value={textQuery} onKeyDown={searchOnEnter} onChange={(e) => setTextQuery(e.target.value)} disabled={busy} />
         <label style={{ marginTop: "0.4rem", fontSize: "0.8rem" }}>What the frame looks like (searches images, no names)</label>

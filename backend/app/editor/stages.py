@@ -1,19 +1,23 @@
 """Editor stages. Each takes a project id and a report(detail) callback, reads and
 writes the project through app.editor.store, and can be re-run at any time."""
 
+import logging
 import math
 import re
 from collections.abc import Callable
+from pathlib import Path
 
 from app.editor import store
-from app.editor.footage import SearchContext, Usage, choose, end_on_a_cut, search_slot
+from app.editor.footage import CANDIDATES_PER_SLOT, SearchContext, Usage, choose, end_on_a_cut, search_slot
 from app.editor.llm import run_claude_json
 from app.editor.quotes import resolve_placement
 from app.editor.render import render_project
-from app.editor.store import Beat, Segment, Slot, Word
+from app.editor.store import Beat, Candidate, Segment, Slot, Word
 from app.editor.voiceover import run_voiceover
 
 Report = Callable[[str], None]
+
+logger = logging.getLogger(__name__)
 
 # --- transcribe -------------------------------------------------------------
 
@@ -282,6 +286,29 @@ QUERIES_SCHEMA = {
                                         "with a blue arrow tattoo on his forehead riding a spinning ball of air'."
                                     ),
                                 },
+                                "moment": {
+                                    "type": "string",
+                                    "description": (
+                                        "Empty for most shots. Only when the narration at this shot names one "
+                                        "particular event that happens in one place in the shows (e.g. 'Iroh's "
+                                        "army breaks through the outer wall of Ba Sing Se'): that event, in one "
+                                        "sentence with names."
+                                    ),
+                                },
+                                "episodes": {
+                                    "type": "array",
+                                    "items": {"type": "integer"},
+                                    "description": "With a moment: the 1-3 episodes it happens in, by number from the episode list.",
+                                },
+                                "photo": {
+                                    "type": "string",
+                                    "description": (
+                                        "Usually empty. For a shot about a real person, place or thing outside the "
+                                        "story's world that the shows never show - the people who made them, voice "
+                                        "actors, real people and places the story drew on: what to search Wikimedia "
+                                        "Commons for to get a photo of it, as its usual name, e.g. 'Mako Iwamatsu'."
+                                    ),
+                                },
                             },
                             "required": ["text_query", "visual_query", "shows"],
                         },
@@ -299,8 +326,15 @@ def _slot_count(beat: Beat, max_clip_seconds: float) -> int:
     return max(1, math.ceil((beat.end - beat.start) / max_clip_seconds - 1e-6))
 
 
+# a comic page gets at least this long on screen, however many pages a beat walks through
+MIN_PAGE_SECONDS = 3.0
+
+
 def _make_slots(beat: Beat, max_clip_seconds: float) -> list[Slot]:
-    count = _slot_count(beat, max_clip_seconds)
+    return _even_slots(beat, _slot_count(beat, max_clip_seconds))
+
+
+def _even_slots(beat: Beat, count: int) -> list[Slot]:
     length = (beat.end - beat.start) / count
     return [
         Slot(start=round(beat.start + i * length, 3), end=round(beat.start + (i + 1) * length, 3))
@@ -308,9 +342,123 @@ def _make_slots(beat: Beat, max_clip_seconds: float) -> list[Slot]:
     ]
 
 
+def _episode_list(db, project: store.Project, in_library: set[str]) -> tuple[str, set[int]]:
+    """The project's episodes, one per line with the number to name them by - for
+    the shot queries to say where a specific moment happens."""
+    from sqlalchemy import select
+
+    from app.db.models import Source
+    from app.editor.quotes import _episode_label
+
+    universe = store.project_universe(project)
+    shows = [show for show in store.project_shows(project) if show in in_library] or sorted(in_library)
+    sources = db.execute(
+        select(Source).where(Source.show_title.in_(shows), Source.kind == "video")
+        .order_by(Source.show_title, Source.book, Source.episode_number)
+    ).scalars().all()
+    return "\n".join(f"[{s.id}] {_episode_label(s, universe)}" for s in sources), {s.id for s in sources}
+
+
+def _has_indexed_pages(db, title: str) -> bool:
+    from sqlalchemy import select
+
+    from app.db.models import Scene
+
+    return db.execute(
+        select(Scene.id).where(Scene.show_title == title, Scene.embedded_at.isnot(None)).limit(1)
+    ).first() is not None
+
+
+REQUERY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "shots": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "shot": {"type": "integer", "description": "The shot number as given."},
+                    "text_query": {"type": "string", "description": "A scene from the shows by what happens in it, with names."},
+                    "visual_query": {"type": "string", "description": "The same shot by what is visible only, no names."},
+                    "shows": {"type": "array", "items": {"type": "string"}, "description": "Which shows to search, by exact title."},
+                },
+                "required": ["shot", "text_query", "visual_query", "shows"],
+            },
+        }
+    },
+    "required": ["shots"],
+}
+
+
+def _requery(project: store.Project, failed: list[tuple[Beat, Slot]], shows: list[str], cwd: Path) -> float:
+    """New queries for shots whose search found nothing - usually a shot sent to a
+    comic with no pages indexed, or one too specific for the index. One Claude call
+    for all of them; the queries are written into the slots."""
+    lines = []
+    for number, (beat, slot) in enumerate(failed):
+        lines.append(
+            f"[{number}] narration: {beat.text}\n"
+            f"    the query that found nothing: {slot.text_query!r} in {', '.join(slot.shows) or 'all shows'}"
+        )
+    prompt = (
+        "A video essay is illustrated with clips from these shows: " + "; ".join(f'"{s}"' for s in shows) + ". "
+        "For the shots below the search of the footage index found nothing - most often because the query "
+        "points to a comic or a moment that is not in the index. Write a new query for each, for footage that "
+        "surely exists in the shows and suits what the narration says: the same characters, the same place, "
+        "or the same feeling, when the exact moment was never shown. text_query describes the scene with "
+        "names, visual_query the same frame by what is visible only, with no names; shows names where to "
+        "search, by exact title.\n\n" + "\n".join(lines)
+    )
+    result, cost = run_claude_json(prompt, REQUERY_SCHEMA, cwd=cwd, timeout=300)
+    for entry in result.get("shots", []):
+        number = int(entry.get("shot", -1))
+        if not 0 <= number < len(failed):
+            continue
+        slot = failed[number][1]
+        slot.text_query = entry["text_query"].strip()
+        slot.visual_query = entry["visual_query"].strip()
+        chosen = [title for title in entry.get("shows", []) if title in shows]
+        slot.shows = chosen if len(chosen) < len(shows) else []
+    return cost or 0.0
+
+
+def _comic_cast(db, comics: list[str], most: int = 12) -> dict[str, list[str]]:
+    """Who appears in each comic, most pages first, from the described pages' tags -
+    so the shot-queries call can tell a comic's own characters (often from comics too
+    new for the model to know) from the shows'. Names on a single page are left out."""
+    from collections import Counter
+
+    from sqlalchemy import select
+
+    from app.db.models import Scene
+
+    cast: dict[str, list[str]] = {}
+    for title in comics:
+        counts: Counter[str] = Counter()
+        for tags in db.execute(select(Scene.character_tags).where(Scene.show_title == title, Scene.caption_status == "done")).scalars():
+            counts.update(tags or [])
+        cast[title] = [name for name, n in counts.most_common(most) if n > 1]
+    return cast
+
+
+def _drop_locks_if_asked(project_id: str, stage: str) -> None:
+    """When the stage was started with "re-pick locked clips too", unlocks every
+    slot before it reads the project (see run_stage's unlock)."""
+
+    def apply(p: store.Project) -> None:
+        if stage in p.unlock_before:
+            p.unlock_before.remove(stage)
+            for beat in p.beats:
+                for slot in beat.slots:
+                    slot.locked = False
+
+    store.update_project(project_id, apply)
+
+
 def run_queries(project_id: str, report: Report) -> None:
     """Asks the LLM what footage should be on screen for every clip slot. Slots a
     user has locked keep their queries and footage."""
+    _drop_locks_if_asked(project_id, "queries")
     project = store.load_project(project_id)
     if not project.beats:
         raise RuntimeError("Build beats first")
@@ -332,9 +480,15 @@ def run_queries(project_id: str, report: Report) -> None:
     db = SessionLocal()
     try:
         in_library = {t for t in db.execute(select(Source.show_title).distinct()).scalars() if t}
+        comics = [title for title in store.project_comics(project) if title in in_library]
+        # a comic with no page in the index yet can't be shown - its shots go to the shows
+        unindexed = [title for title in comics if not _has_indexed_pages(db, title)]
+        comics = [title for title in comics if title not in unindexed]
+        cast = _comic_cast(db, comics)
+        episode_list, episode_ids = _episode_list(db, project, in_library - set(comics))
     finally:
         db.close()
-    available = [show for show in store.project_shows(project) if show in in_library] or sorted(in_library)
+    available = [show for show in store.project_shows(project) if show in in_library] or sorted(in_library - set(comics))
     shows = ", ".join(available)
     total_cost = 0.0
     for window_start in range(0, len(beats), QUERY_WINDOW_BEATS):
@@ -345,7 +499,8 @@ def run_queries(project_id: str, report: Report) -> None:
         prompt = (
             f"A video essay is being illustrated with clips cut from {shows}. Below is its narration, split "
             "into numbered beats. For every beat, describe the shots from the show that should be on screen "
-            "while it is spoken - exactly as many shots as 'shots needed' says.\n\n"
+            "while it is spoken - exactly as many shots as 'shots needed' says (a beat told from a comic is "
+            "the exception, see below).\n\n"
             "Each shot is found by searching an index of the show's scenes, so describe footage that really "
             "exists in the show, as concretely as you can: a specific moment, character, place or action. "
             "When the narration is abstract or general, choose concrete imagery from the show that illustrates "
@@ -360,7 +515,59 @@ def run_queries(project_id: str, report: Report) -> None:
             "only where the moment actually happens gives much better matches than searching everything, so "
             "name one when you know it; name several when the same thing can be found in more than one, or "
             "when you are not sure.\n\n"
-            "Beats:\n" + "\n".join(lines)
+            + (
+                "The library also holds these comics, page by page (with who appears on their pages, most "
+                "often first):\n"
+                + "\n".join(f'- "{title}": {", ".join(cast.get(title, [])) or "no pages described yet"}' for title in comics)
+                + "\nWhen the narration at a shot is about something that happens in one of these comics - "
+                "and not in the shows - give that comic's title in shows, alone: a page of the comic is then "
+                "shown in place of a clip. A character who appears in a comic but never in the shows marks the "
+                "narration around him as the comic's story, even when it also names places or events of the "
+                "shows: a shot introducing such a character, or telling what he does, goes to the comic. For "
+                "such a shot text_query describes what happens on the page, with names, and visual_query is not "
+                "used. Do not send a shot to a comic merely because the comic also touches on the subject; "
+                "otherwise the shows come first.\n"
+                "A comic's shots are its pages, and they are not bound by 'shots needed' or any length: when a "
+                "whole beat goes to a comic, give one shot per page the narration there walks through - a single "
+                "page when it dwells on one moment, several when it moves through a sequence of events, in the "
+                "order they happen. The beat's time is shared between them, however long that makes each page "
+                f"(but no less than {MIN_PAGE_SECONDS:.0f}s a page).\n\n"
+                if comics
+                else ""
+            )
+            + (
+                "These comics are not in the library's index yet, so nothing from them can be shown: "
+                + "; ".join(f'"{title}"' for title in unindexed)
+                + ". Where the narration (or the author's notes) points to one of them, choose the closest "
+                "footage from the shows instead - the same characters, place or feeling.\n\n"
+                if unindexed
+                else ""
+            )
+            + (
+                "Most shots only illustrate what the narration says - any fitting clip will do. Some are about "
+                "one particular event the narration explicitly names, which happens in one place in the shows "
+                "(a battle, a duel, a confession, a death, a specific scene): for those also give moment - the "
+                "event, in one sentence - and the 1-3 episodes it happens in, by number from the list below. "
+                "The episodes are then read to find the exact scene. Only explicit events: a general statement, "
+                "a habit, a mood or a character's nature is not a moment, and neither is a shot for a comic or "
+                "a photo.\n\nEpisodes:\n" + episode_list + "\n\n"
+                if episode_list
+                else ""
+            )
+            + (
+                "When the narration at a shot is about the real world rather than the story - the people who "
+                "made the shows, voice actors, real people, places, art or events the story drew on - and the "
+                "shows have nothing that shows it, put what to photograph in photo: a photo from Wikimedia "
+                "Commons is then shown in place of a clip. Still write text_query and visual_query for the "
+                "closest footage, in case no photo is found. Leave photo empty for everything else.\n\n"
+            )
+            + (
+                "The author's notes on where the material comes from - trust them over your own memory, "
+                "and send a shot to the source they name:\n" + project.footage_notes.strip() + "\n\n"
+                if project.footage_notes and project.footage_notes.strip()
+                else ""
+            )
+            + "Beats:\n" + "\n".join(lines)
         )
         report(f"writing shot queries for beats {window_start + 1}-{window_start + len(window)} of {len(beats)}")
         result, cost = run_claude_json(prompt, QUERIES_SCHEMA, cwd=store.project_dir(project_id), timeout=600)
@@ -370,16 +577,35 @@ def run_queries(project_id: str, report: Report) -> None:
             index = int(entry["beat"])
             if not window_start <= index < window_start + len(window) or not entry["shots"]:
                 continue
-            for i, slot in enumerate(beats[index].slots):
+            beat = beats[index]
+            pages = [shot for shot in entry["shots"] if any(title in comics for title in shot.get("shows", []))]
+            if pages and len(pages) == len(entry["shots"]) and not any(slot.locked for slot in beat.slots):
+                # a beat told from a comic: as many pages as the narration walks through,
+                # sharing the beat evenly - not held to the clip-length limit
+                count = max(1, min(len(pages), int((beat.end - beat.start) // MIN_PAGE_SECONDS)))
+                if count != len(beat.slots):
+                    beat.slots = _even_slots(beat, count)
+            for i, slot in enumerate(beat.slots):
                 if slot.locked:
                     continue
                 # fewer shots returned than slots: reuse the last one rather than leave a slot unsearchable
                 shot = entry["shots"][min(i, len(entry["shots"]) - 1)]
                 slot.text_query = shot["text_query"].strip()
                 slot.visual_query = shot["visual_query"].strip()
+                slot.photo_query = (shot.get("photo") or "").strip()
+                slot.moment = (shot.get("moment") or "").strip()
+                slot.moment_episodes = (
+                    [int(e) for e in shot.get("episodes", []) if int(e) in episode_ids][:3] if slot.moment else []
+                )
+                if not slot.moment_episodes:
+                    slot.moment = ""
                 # only titles that exist; a single-show library needs no restriction
                 chosen = [title for title in shot.get("shows", []) if title in available]
-                slot.shows = chosen if len(available) > 1 and len(chosen) < len(available) else []
+                in_comics = [title for title in shot.get("shows", []) if title in comics]
+                if in_comics:
+                    slot.shows = in_comics  # a shot for a comic is searched in the comic only
+                else:
+                    slot.shows = chosen if len(available) > 1 and len(chosen) < len(available) else []
 
     def apply(p: store.Project) -> None:
         p.beats = beats
@@ -393,9 +619,15 @@ def run_queries(project_id: str, report: Report) -> None:
 
 def run_select(project_id: str, report: Report) -> None:
     """Searches the index for every unlocked slot, in narration order, so footage
-    already used earlier in the video isn't picked again. Free and local."""
+    already used earlier in the video isn't picked again. Free and local - except
+    for shots that want a photo, which are searched on Wikimedia Commons and looked
+    at by Claude (once per photo query; see editor/photos.py)."""
     from app.db.session import SessionLocal
+    from app.editor import photos
+    from app.editor.comic_pages import pick_pages
+    from app.editor.moments import find_moments
 
+    _drop_locks_if_asked(project_id, "select")
     project = store.load_project(project_id)
     slots = [slot for beat in project.beats for slot in beat.slots]
     if not any(slot.text_query or slot.visual_query for slot in slots):
@@ -406,9 +638,63 @@ def run_select(project_id: str, report: Report) -> None:
         report("loading search models")
         ctx = SearchContext(db, project)
         usage = Usage()
+        photo_cache = photos.load_cache(project_id)
+        llm_cost = 0.0
         for slot in slots:
             if slot.locked and slot.selected is not None:
                 usage.add(slot.candidates[slot.selected])
+
+        # every beat from the even split (see the loop below) before anything is cut to a slot's length
+        limit = project.settings.max_clip_seconds
+        for beat in project.beats:
+            if beat.slots and not any(slot.locked for slot in beat.slots) and len(beat.slots) == _slot_count(beat, limit):
+                for slot, fresh in zip(beat.slots, _make_slots(beat, limit)):
+                    slot.start, slot.end = fresh.start, fresh.end
+
+        # Specific moments first, from reading their episodes, and reserved: an
+        # illustrative shot earlier in the video must not use up a clip one of them needs.
+        specific = [
+            (beat, slot) for beat in project.beats for slot in beat.slots
+            if slot.moment and slot.moment_episodes and not (slot.locked and slot.selected is not None)
+        ]
+        moments_for: dict[int, Candidate] = {}
+        if specific:
+            moments_for, cost = find_moments(db, project_id, specific, report)
+            llm_cost += cost
+            for candidate in moments_for.values():
+                usage.add(candidate)
+
+        # Shots sent to a comic: Claude reads the comic's pages and picks the page for
+        # each (one call per comic), rather than trusting the vector search alone.
+        pages_for: dict[int, Candidate | None] = {}  # id(slot) -> picked page
+        by_comic: dict[str, list[tuple[Beat, Slot]]] = {}
+        for beat in project.beats:
+            for slot in beat.slots:
+                if not (slot.locked and slot.selected is not None) and len(slot.shows) == 1 and slot.shows[0] in ctx.comics:
+                    by_comic.setdefault(slot.shows[0], []).append((beat, slot))
+        for title, shots in by_comic.items():
+            report(f"picking pages of {title} for {len(shots)} shot{'s' if len(shots) > 1 else ''}")
+            try:
+                picked, cost = pick_pages(db, title, shots, store.project_dir(project_id))
+            except Exception as exc:  # the vector search's pages are still there
+                logger.warning("picking pages of %s: %s", title, exc)
+                continue
+            llm_cost += cost
+            for i, (_, slot) in enumerate(shots):
+                pages_for[id(slot)] = picked.get(i)
+        # the same page for two shots in a row of one beat: one shot, the page shown longer
+        for beat in project.beats:
+            merged: list[Slot] = []
+            for slot in beat.slots:
+                page = pages_for.get(id(slot))
+                before = pages_for.get(id(merged[-1])) if merged else None
+                if page is not None and before is not None and page.scene_id == before.scene_id and not merged[-1].locked:
+                    merged[-1].end = slot.end
+                    before.clip_end = round(merged[-1].end - merged[-1].start, 3)
+                else:
+                    merged.append(slot)
+            beat.slots = merged
+        slots = [slot for beat in project.beats for slot in beat.slots]
         n = 0
         for beat in project.beats:
             # Start every run from the even split, so boundaries moved by an earlier
@@ -426,16 +712,61 @@ def run_select(project_id: str, report: Report) -> None:
                 n += 1
                 if slot.locked and slot.selected is not None:
                     continue
-                choose(slot, search_slot(ctx, slot), usage)
+                found = search_slot(ctx, slot)
+                if id(slot) in moments_for:
+                    moment = moments_for[id(slot)]
+                    slot.candidates = [moment] + [c for c in found if c.scene_id != moment.scene_id][: CANDIDATES_PER_SLOT - 1]
+                    slot.selected = 0
+                    report(f"finding footage {n}/{len(slots)}")
+                    continue
+                if id(slot) in pages_for:
+                    page = pages_for[id(slot)]
+                    if page is None:
+                        # no page shows it: left empty, so it gets new queries for the shows below
+                        slot.candidates, slot.selected = [], None
+                    else:
+                        # Claude's page, even if shown earlier - the narration may come back to a moment
+                        page.clip_end = round(slot.end - slot.start, 3)
+                        slot.candidates = [page] + [c for c in found if c.scene_id != page.scene_id][: CANDIDATES_PER_SLOT - 1]
+                        slot.selected = 0
+                        usage.add(page)
+                    report(f"finding footage {n}/{len(slots)}")
+                    continue
+                if slot.photo_query.strip():
+                    report(f"finding footage {n}/{len(slots)} - looking for a photo of {slot.photo_query}")
+                    pictures, cost = photos.photo_candidates(project_id, slot, beat.text, photo_cache)
+                    photos.save_cache(project_id, photo_cache)
+                    llm_cost += cost
+                    found = pictures + found
+                choose(slot, found, usage)
                 # let this clip end on a cut by trading a little time with the next one
                 if flexible and i + 1 < len(beat.slots):
                     end_on_a_cut(db, slot, beat.slots[i + 1], limit)
                 report(f"finding footage {n}/{len(slots)}")
+
+        # Shots that found nothing get new queries, written for the shows, and are
+        # searched again; whatever still finds nothing is searched by its narration.
+        failed = [(beat, slot) for beat in project.beats for slot in beat.slots if not slot.candidates and not slot.locked]
+        if failed:
+            report(f"writing new queries for {len(failed)} shot{'s' if len(failed) > 1 else ''} that found nothing")
+            shows = ctx.project_shows or sorted(set(store.project_universe(project).shows))
+            try:
+                llm_cost += _requery(project, failed, shows, store.project_dir(project_id))
+            except Exception as exc:  # the fallback below still gives them footage
+                logger.warning("re-querying failed shots: %s", exc)
+            for beat, slot in failed:
+                found = search_slot(ctx, slot)
+                if not found:
+                    slot.shows = []
+                    slot.text_query = beat.text
+                    found = search_slot(ctx, slot)
+                choose(slot, found, usage)
     finally:
         db.close()
 
     def apply(p: store.Project) -> None:
         p.beats = project.beats
+        p.llm_cost_usd = round(p.llm_cost_usd + llm_cost, 4)
 
     store.update_project(project_id, apply)
 

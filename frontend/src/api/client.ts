@@ -3,6 +3,8 @@ const BASE_URL = "http://localhost:8000";
 export interface SourceOut {
   id: number;
   file_path: string;
+  // "comic": a PDF whose pages are indexed like scenes
+  kind?: "video" | "comic";
   title: string | null;
   show_title: string | null;
   book: number | null;
@@ -109,6 +111,8 @@ export interface SettingsOut {
 export interface SceneOut {
   id: number;
   source_id: number;
+  // "comic": a page of a comic; start_time is its number counted from 0
+  kind?: "video" | "comic";
   show_title: string | null;
   book: number | null;
   episode_number: number | null;
@@ -153,6 +157,9 @@ export interface SceneTechnicalOut {
 export interface SceneDetailOut extends SceneOut {
   transcript_lines: TranscriptLineOut[];
   source_file_path: string | null;
+  source_file_exists?: boolean;
+  episode_title?: string | null;
+  page_count?: number | null;
   technical: SceneTechnicalOut;
 }
 
@@ -212,6 +219,11 @@ export interface EditorCandidate {
   scene_id: number;
   source_id: number;
   file_path: string;
+  // "comic": a page of a comic (scene_start is its number from 0), shown scrolling
+  kind?: "video" | "comic" | "photo";
+  image_path?: string | null;
+  // a photo's attribution, as its licence asks for it
+  credit?: string | null;
   show_title: string | null;
   book: number | null;
   episode_number: number | null;
@@ -228,6 +240,11 @@ export interface EditorCandidate {
 }
 
 export interface EditorSlot {
+  // a real person or thing to show a photo of, for a shot the shows have nothing for
+  photo_query?: string;
+  // a particular event the narration names, looked for by reading these episodes
+  moment?: string;
+  moment_episodes?: number[];
   start: number;
   end: number;
   text_query: string;
@@ -408,6 +425,16 @@ export interface EditorJob {
   started_at: string;
 }
 
+// a standard sound effect from the library shared by all projects
+export interface EditorSound {
+  name: string;
+  label: string;
+  // the kind of shot it starts: "comic" or "photo"
+  used_for: string;
+  prompt: string;
+  files: string[];
+}
+
 export interface EditorProject {
   version: number;
   id: string;
@@ -418,6 +445,8 @@ export interface EditorProject {
   audio_file: string | null;
   audio_duration: number | null;
   script_text: string | null;
+  footage_notes?: string | null;
+  unlock_before?: string[];
   shows: string[];
   settings: {
     layout: "framed" | "simple";
@@ -437,6 +466,9 @@ export interface EditorProject {
     quote_cuts: boolean;
     music_enabled: boolean;
     music_level: number;
+    comic_width: number;
+    sound_effects: boolean;
+    sfx_volume: number;
   };
   word_count: number;
   timeline: EditorSegment[];
@@ -578,6 +610,7 @@ export const api = {
     payload: {
       title?: string;
       script_text?: string;
+      footage_notes?: string;
       shows?: string[];
       layout?: string;
       search_mode?: string;
@@ -595,6 +628,9 @@ export const api = {
       quote_cuts?: boolean;
       music_enabled?: boolean;
       music_level?: number;
+      comic_width?: number;
+      sound_effects?: boolean;
+      sfx_volume?: number;
     }
   ) => request<EditorProject>(`/api/editor/projects/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   // raw body upload - the backend has no multipart parser
@@ -604,8 +640,9 @@ export const api = {
       headers: { "Content-Type": "application/octet-stream" },
       body: file,
     }),
-  runEditorStage: (id: string, stage: EditorStage) =>
-    request<EditorProject>(`/api/editor/projects/${id}/run/${stage}`, { method: "POST" }),
+  // unlock: re-pick the clips the user locked too (shot queries, find footage)
+  runEditorStage: (id: string, stage: EditorStage, unlock = false) =>
+    request<EditorProject>(`/api/editor/projects/${id}/run/${stage}${unlock ? "?unlock=true" : ""}`, { method: "POST" }),
   getEditorTranscript: (id: string) => request<EditorWord[]>(`/api/editor/projects/${id}/transcript`),
   unqueueEditorStage: (id: string, stage: EditorStage) =>
     request<EditorProject>(`/api/editor/projects/${id}/queue/${stage}`, { method: "DELETE" }),
@@ -667,6 +704,11 @@ export const api = {
     }),
   replanMusic: (id: string) => request<EditorProject>(`/api/editor/projects/${id}/music/replan`, { method: "POST" }),
   musicFileUrl: (id: string, file: string) => `${BASE_URL}/api/editor/projects/${id}/music/files/${file}`,
+  listSounds: () => request<EditorSound[]>("/api/editor/sounds"),
+  generateSound: (name: string) => request<EditorSound[]>(`/api/editor/sounds/${name}/generate`, { method: "POST" }),
+  soundFileUrl: (file: string) => `${BASE_URL}/api/editor/sounds/files/${encodeURIComponent(file)}`,
+  editorPhotoUrl: (id: string, path: string) =>
+    `${BASE_URL}/api/editor/projects/${id}/photos/${encodeURIComponent(path.split(/[\\/]/).pop() ?? "")}`,
 
   getVoiceover: (id: string) => request<Voiceover>(`/api/editor/projects/${id}/voiceover`),
   setVoiceSettings: (id: string, settings: VoiceSettings) =>

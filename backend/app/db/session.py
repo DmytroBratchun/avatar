@@ -42,6 +42,7 @@ def init_db() -> None:
         _ensure_column(conn, "scenes", "region", "VARCHAR")
         _ensure_column(conn, "sources", "wiki_page", "VARCHAR")
         _ensure_column(conn, "scenes", "wiki_description", "TEXT")
+        _ensure_column(conn, "sources", "kind", "VARCHAR NOT NULL DEFAULT 'video'")
         conn.exec_driver_sql(
             "CREATE VIRTUAL TABLE IF NOT EXISTS scene_text_vec "
             "USING vec0(scene_id INTEGER PRIMARY KEY, embedding FLOAT[1024])"

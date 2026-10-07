@@ -23,9 +23,10 @@ def stream_source(source_id: int, request: Request, db: Session = Depends(get_db
         raise HTTPException(404, "Source file missing on disk")
 
     file_size = path.stat().st_size
+    media_type = "application/pdf" if path.suffix.lower() == ".pdf" else "video/mp4"
     range_header = request.headers.get("range")
     if range_header is None:
-        return FileResponse(path, media_type="video/mp4")
+        return FileResponse(path, media_type=media_type, headers={"Accept-Ranges": "bytes"})
 
     start_str, _, end_str = range_header.replace("bytes=", "").partition("-")
     start = int(start_str) if start_str else 0
@@ -49,7 +50,7 @@ def stream_source(source_id: int, request: Request, db: Session = Depends(get_db
         "Accept-Ranges": "bytes",
         "Content-Length": str(length),
     }
-    return StreamingResponse(iterator(), status_code=206, media_type="video/mp4", headers=headers)
+    return StreamingResponse(iterator(), status_code=206, media_type=media_type, headers=headers)
 
 
 @router.get("/scenes/{scene_id}/keyframes/{index}")

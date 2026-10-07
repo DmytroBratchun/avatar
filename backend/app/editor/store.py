@@ -65,6 +65,14 @@ class Candidate(BaseModel):
     scene_id: int
     source_id: int
     file_path: str
+    # "video", or "comic": a page of a comic, shown scrolling down the screen. For a
+    # page, image_path is its picture and scene_start its number counted from 0;
+    # clip_start/clip_end only carry the slot's length.
+    kind: str = "video"
+    image_path: str | None = None
+    # "photo": a photo from Wikimedia Commons (see editor/photos.py), shown still;
+    # credit is the attribution its licence asks for
+    credit: str | None = None
     show_title: str | None = None
     book: int | None = None
     episode_number: int | None = None
@@ -97,6 +105,14 @@ class Slot(BaseModel):
     visual_query: str = ""
     # which shows/films to look in for this clip; empty = everything the project allows
     shows: list[str] = Field(default_factory=list)
+    # a real person or thing to show a photo of (searched on Wikimedia Commons), for a
+    # shot about something the shows never showed; empty for most shots
+    photo_query: str = ""
+    # a particular event the narration names, which happens in one place in the show
+    # (see editor/moments.py), and the episodes (source ids) it is expected in;
+    # empty for a shot that only illustrates
+    moment: str = ""
+    moment_episodes: list[int] = Field(default_factory=list)
     candidates: list[Candidate] = Field(default_factory=list)
     selected: int | None = None  # index into candidates
     locked: bool = False  # chosen by the user - automatic selection leaves it alone
@@ -238,6 +254,13 @@ class RenderSettings(BaseModel):
     # much quieter than the voice it plays, in loudness units
     music_enabled: bool = True
     music_level: float = 18.0
+    # how wide a comic page is shown, as a share of the screen's width. Wider means
+    # more of the page to scroll through, and a softer picture: the scans are small
+    comic_width: float = 0.55
+    # standard sound effects (editor/sounds.py) at the start of comic pages and photos,
+    # played this many dB below their normalised peak
+    sound_effects: bool = True
+    sfx_volume: float = 12.0
 
 
 class Project(BaseModel):
@@ -249,6 +272,10 @@ class Project(BaseModel):
     audio_file: str | None = None
     audio_duration: float | None = None
     script_text: str | None = None
+    # the author's notes on where the script's material comes from ("Keung and June
+    # are from the comic The Bounty Hunter and the Tea Brewer") - read by the
+    # shot-queries call, so a shot is looked for where its story actually is
+    footage_notes: str | None = None
     # the fictional world this video is about; decides which shows it can use and
     # what the prompts say about the world. Empty on projects made before universes.
     universe: str = ""
@@ -265,6 +292,8 @@ class Project(BaseModel):
     job: Job | None = None
     # stages waiting to run after the current one, in order
     queue: list[str] = Field(default_factory=list)
+    # stages that are to re-pick the clips the user locked too, the next time they run
+    unlock_before: list[str] = Field(default_factory=list)
 
 
 def now() -> str:
@@ -322,6 +351,12 @@ def project_universe(project: "Project") -> Universe:
     if project.shows:
         return universe_for_show(project.shows[0])
     return all_universes()[0]
+
+
+def project_comics(project: "Project") -> list[str]:
+    """Comics of the project's universe. A clip is looked for in one only when its
+    shot was written for that comic (Slot.shows names it)."""
+    return list(project_universe(project).comics)
 
 
 def project_shows(project: "Project") -> list[str]:

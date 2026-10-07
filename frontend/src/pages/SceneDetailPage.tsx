@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client";
+import ComicPageView from "../components/ComicPageView";
 import SceneTechnical from "../components/SceneTechnical";
 import TagMultiSelect from "../components/TagMultiSelect";
 
@@ -62,20 +63,35 @@ export default function SceneDetailPage() {
   }
 
   if (!scene) return <p>Loading…</p>;
+  const comic = scene.kind === "comic";
 
   return (
     <div>
       <Link to="/search" className="hint" style={{ display: "inline-block", marginBottom: "0.75rem" }}>
         ← Back to search
       </Link>
+      {comic ? (
+        <h1>
+          {scene.show_title}
+          {scene.episode_number != null && ` · Part ${scene.episode_number}`}
+          <span style={{ color: "var(--text-tertiary)", fontWeight: 400, fontSize: "0.9rem", marginLeft: "0.6rem" }}>
+            comic · page {Math.round(scene.start_time) + 1}
+            {scene.page_count ? ` of ${scene.page_count}` : ""}
+          </span>
+        </h1>
+      ) : (
       <h1>
         Book {scene.book} · Episode {scene.episode_number}
         <span style={{ color: "var(--text-tertiary)", fontWeight: 400, fontSize: "0.9rem", marginLeft: "0.6rem" }}>
           {formatTime(scene.start_time)}–{formatTime(scene.end_time)} · {(scene.end_time - scene.start_time).toFixed(1)}s
         </span>
       </h1>
+      )}
 
       <div className="scene-detail-layout" style={{ marginTop: "0.75rem" }}>
+        {comic ? (
+          <ComicPageView scene={scene} />
+        ) : (
         <div>
           <video ref={videoRef} controls src={`${api.streamUrl(scene.source_id)}#t=${scene.start_time}`} />
           <div className="keyframes">
@@ -87,6 +103,7 @@ export default function SceneDetailPage() {
             {copied ? "Copied ✓" : "Copy timestamp + path"}
           </button>
         </div>
+        )}
 
         <div>
           <div className="card">
@@ -129,6 +146,7 @@ export default function SceneDetailPage() {
             </div>
           )}
 
+          {!comic && (
           <div className="card" style={{ marginTop: "0.75rem", maxHeight: "360px", overflowY: "auto" }}>
             <h3>Transcript</h3>
             {scene.transcript_lines.length === 0 && <p style={{ margin: 0 }}>No dialogue in this scene.</p>}
@@ -142,6 +160,7 @@ export default function SceneDetailPage() {
               </div>
             ))}
           </div>
+          )}
 
           <div className="card" style={{ marginTop: "0.75rem" }}>
             <h3>Provenance</h3>
@@ -174,7 +193,7 @@ export default function SceneDetailPage() {
             </p>
           </div>
 
-          <SceneTechnical scene={scene} onSeek={seek} />
+          {!comic && <SceneTechnical scene={scene} onSeek={seek} />}
         </div>
       </div>
     </div>

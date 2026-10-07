@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Scene, Source
 from app.pipeline.stages.caption import CaptioningUnavailable, run_captioning
+from app.pipeline.stages.comic_pages import run_comic_pages
 from app.services.runtime_settings import caption_only_undescribed
 from app.pipeline.stages.detect_shots import run_shot_detection
 from app.pipeline.stages.embed import run_embedding, run_text_embedding_only, run_visual_embedding_only
@@ -27,6 +28,17 @@ LOCAL_STAGES = [
 ]
 
 STAGES = LOCAL_STAGES + [run_captioning, run_embedding]
+
+# a comic has no sound and no shots: its pages are rendered, then described and embedded
+COMIC_LOCAL_STAGES = [run_comic_pages]
+
+
+def local_stages_for(source: Source) -> list:
+    return COMIC_LOCAL_STAGES if source.kind == "comic" else LOCAL_STAGES
+
+
+def stages_for(source: Source) -> list:
+    return local_stages_for(source) + [run_captioning, run_embedding]
 
 # "unqueued" = taken off a queue from the UI before local prep finished - parked,
 # neither worker touches it until it's queued again
@@ -91,7 +103,7 @@ def was_dequeued(db: Session, source: Source, parked_statuses: list[str]) -> boo
 
 def process_source(db: Session, source: Source) -> None:
     try:
-        for stage in STAGES:
+        for stage in stages_for(source):
             if was_dequeued(db, source, TERMINAL_STATUSES):
                 logger.info("  [source %s] removed from queue - stopping", source.id)
                 return
@@ -135,7 +147,7 @@ def process_source_local_only(db: Session, source: Source) -> None:
         # 'paused' is this queue's own waiting status, so only the other parked
         # statuses mean it was removed
         parked = [s for s in TERMINAL_STATUSES if s != "paused"]
-        for stage in LOCAL_STAGES:
+        for stage in local_stages_for(source):
             if was_dequeued(db, source, parked):
                 logger.info("  [source %s] removed from queue - stopping", source.id)
                 return

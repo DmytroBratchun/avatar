@@ -171,10 +171,44 @@ def _prompt_version(schema: dict, instruction: str) -> str:
     return "caption-" + hashlib.sha256(fingerprint.encode()).hexdigest()[:8]
 
 
+# A comic page is described with the same fields as a scene, so it is found by the
+# same search; only what the model is told it is looking at differs.
+COMIC_INSTRUCTION_TEXT = (
+    "Describe this page: what is drawn on it, then a specific narrative description of what happens on "
+    "the page - who does what, what is said that matters and why it matters to the story - using "
+    "character names and plot context (not generic), which named characters appear, and where it takes "
+    "place. A page with no story on it (a cover, a title page, credits, an advert) is described as just that."
+)
+
+
+def _instruction(source: Source) -> str:
+    return COMIC_INSTRUCTION_TEXT if source.kind == "comic" else INSTRUCTION_TEXT
+
+
+def _context_block(source: Source, scene: Scene, text: str) -> str:
+    """What comes with the images: an episode scene's dialogue, or for a comic page
+    its number and what the page before it was about - a page is rarely
+    understandable alone."""
+    if source.kind == "comic":
+        return (
+            f"This is page {int(scene.start_time) + 1}.\n"
+            f"What happened on the page before:\n{text or '(nothing - this is the first page)'}"
+        )
+    return f"Dialogue during this scene:\n{text or '(no dialogue)'}"
+
+
 def _episode_primer(source: Source) -> str:
     """One or two sentences telling the model what it is looking at. A film has no
     season or episode, so those parts are only mentioned when they exist."""
     universe = universe_for_show(source.show_title)
+    if source.kind == "comic":
+        where = f"the comic {source.show_title or 'book'}"
+        if source.episode_number is not None:
+            where += f", Part {source.episode_number}"
+        primer = f"This is a page from {where}."
+        if universe.description:
+            primer += f" {universe.description}"
+        return primer
     where = source.show_title or "this show"
     if source.book is not None:
         where += f", {universe.season_word} {source.book}"
@@ -269,7 +303,11 @@ def caption_scene_via_api(
     content = [
         {"type": "text", "text": primer, "cache_control": {"type": "ephemeral"}},
         *[_image_block(p) for p in scene.keyframe_paths],
-        {"type": "text", "text": f"Dialogue during this scene:\n{transcript_text or '(no dialogue)'}"},
+        {
+            "type": "text",
+            "text": _context_block(source, scene, transcript_text)
+            + (f"\n\n{COMIC_INSTRUCTION_TEXT}" if source.kind == "comic" else ""),
+        },
     ]
     model = current_caption_model()
     response = _client().messages.create(
@@ -300,10 +338,14 @@ def caption_scene_via_claude_code(
     image_list = "\n".join(f"- {p}" for p in scene.keyframe_paths)
     prompt = (
         f"{_episode_primer(source)}\n\n"
-        f"Use your Read tool to look at these {len(scene.keyframe_paths)} keyframe image(s) from the scene:\n"
-        f"{image_list}\n\n"
-        f"Dialogue during this scene:\n{transcript_text or '(no dialogue)'}\n\n"
-        f"{INSTRUCTION_TEXT}"
+        + (
+            "Use your Read tool to look at the image of the page:\n"
+            if source.kind == "comic"
+            else f"Use your Read tool to look at these {len(scene.keyframe_paths)} keyframe image(s) from the scene:\n"
+        )
+        + f"{image_list}\n\n"
+        f"{_context_block(source, scene, transcript_text)}\n\n"
+        f"{_instruction(source)}"
         + (f"\n\n{tag_hint}" if tag_hint else "")
     )
 
@@ -384,6 +426,8 @@ def caption_scene(
     if provider == "claude_code":
         return caption_scene_via_claude_code(source, scene, transcript_text, tag_hint, schema)
     if provider == "local":
+        if source.kind == "comic":
+            raise RuntimeError("Comic pages are described with Claude - the local caption model is not set up for them")
         # the local model keeps its own, narrower schema (see LOCAL_CAPTION_SCHEMA)
         return caption_scene_via_local(source, scene, transcript_text, tag_hint)
     return caption_scene_via_api(source, scene, transcript_text, tag_hint, schema)
@@ -434,6 +478,14 @@ def run_captioning(db: Session, source: Source) -> None:
             ).scalars()
         )
         transcript_text = "\n".join((f"{line.speaker}: " if line.speaker else "") + line.text for line in lines)
+        if source.kind == "comic":
+            # in place of dialogue: what the page before was about
+            before = db.execute(
+                select(Scene.context_description).where(
+                    Scene.source_id == source.id, Scene.start_time == scene.start_time - 1
+                )
+            ).scalar_one_or_none()
+            transcript_text = before or ""
 
         # the claude CLI occasionally fails transiently (rate limit/server hiccup) when
         # fired off in a long rapid sequence - a couple of retries with backoff clears
@@ -442,6 +494,10 @@ def run_captioning(db: Session, source: Source) -> None:
         for attempt in range(3):
             try:
                 result, cost = caption_scene(source, scene, transcript_text, tag_hint, caption_schema)
+                # now and then the model answers with a placeholder ("test") in place of
+                # a description; that is a failed attempt, not a caption
+                if len((result.get("context_description") or "").strip()) < 20:
+                    raise RuntimeError(f"description too short to be real: {result.get('context_description')!r}")
                 scene.visual_description = result["visual_description"]
                 scene.context_description = result["context_description"]
                 scene.character_tags = _tag_list(result["character_tags"])
@@ -455,7 +511,7 @@ def run_captioning(db: Session, source: Source) -> None:
                 schema, instruction = (
                     (LOCAL_CAPTION_SCHEMA, LOCAL_INSTRUCTION_TEXT)
                     if provider == "local"
-                    else (caption_schema, INSTRUCTION_TEXT)
+                    else (caption_schema, _instruction(source))
                 )
                 scene.model_version = f"{provider}:{current_caption_model()}:{_prompt_version(schema, instruction)}"
                 if cost is not None:

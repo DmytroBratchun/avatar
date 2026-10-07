@@ -18,7 +18,17 @@ export default function SceneCard({ scene }: { scene: SceneOut }) {
       {scene.keyframe_paths.length > 0 && <img src={api.keyframeUrl(scene.id, 0)} alt="" />}
       <div style={{ minWidth: 0 }}>
         <div className="scene-meta">
-          Book {scene.book} · Ep {scene.episode_number} · {formatTime(scene.start_time)}–{formatTime(scene.end_time)} · {(scene.end_time - scene.start_time).toFixed(1)}s
+          {scene.kind === "comic" ? (
+            <>
+              <span className="badge">comic</span> {scene.show_title}
+              {scene.episode_number != null && ` · Part ${scene.episode_number}`} · page {Math.round(scene.start_time) + 1}
+            </>
+          ) : (
+            <>
+              Book {scene.book} · Ep {scene.episode_number} · {formatTime(scene.start_time)}–{formatTime(scene.end_time)} ·{" "}
+              {(scene.end_time - scene.start_time).toFixed(1)}s
+            </>
+          )}
         </div>
         <p>{scene.context_description ?? scene.visual_description ?? scene.wiki_description ?? "(no description yet)"}</p>
         <div>

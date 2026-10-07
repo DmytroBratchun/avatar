@@ -53,13 +53,15 @@ function Slider({
   );
 }
 
-/** One group of settings; touching anything in it switches the preview to its format. */
+/** One group of settings, folded until its title is clicked; opening it or touching
+anything in it switches the preview to its format. */
 function Section({
   title,
   subtitle,
   format,
   active,
   onFocus,
+  defaultOpen = false,
   children,
 }: {
   title: string;
@@ -67,23 +69,26 @@ function Section({
   format?: LookFormat;
   active?: boolean;
   onFocus?: (format: LookFormat) => void;
+  defaultOpen?: boolean;
   children: React.ReactNode;
 }) {
   return (
-    <div
+    <details
       className="look-section"
+      open={defaultOpen}
       style={{ borderLeftColor: active ? "var(--accent)" : "var(--border)" }}
+      onToggle={(e) => (e.currentTarget as HTMLDetailsElement).open && format && onFocus?.(format)}
       onPointerDown={() => format && onFocus?.(format)}
       onFocusCapture={() => format && onFocus?.(format)}
     >
-      <div style={{ display: "flex", alignItems: "baseline", gap: "0.5rem", flexWrap: "wrap" }}>
-        <h4 style={{ margin: 0 }}>{title}</h4>
+      <summary style={{ cursor: "pointer", display: "flex", alignItems: "baseline", gap: "0.5rem", flexWrap: "wrap" }}>
+        <h4 style={{ margin: 0, display: "inline" }}>{title}</h4>
         <span className="hint" style={{ margin: 0 }}>
           {subtitle}
         </span>
-      </div>
+      </summary>
       <div style={{ marginTop: "0.5rem" }}>{children}</div>
-    </div>
+    </details>
   );
 }
 
@@ -136,7 +141,7 @@ export default function RenderSettingsCard({
     <div className="card">
       <h3>Look</h3>
 
-      <Section title="Whole video" subtitle="applies to every clip">
+      <Section title="Whole video" subtitle="applies to every clip" defaultOpen>
         <label>Layout</label>
         <select value={settings.layout} disabled={busy} onChange={(e) => save({ layout: e.target.value })}>
           <option value="framed">Framed - old 4:3 footage sits in a frame over a blurred background</option>
@@ -308,6 +313,27 @@ export default function RenderSettingsCard({
           onChange={setWideFill}
           onCommit={() => save({ wide_fill: wideFill })}
         />
+      </Section>
+
+      <Section title="Comic pages" subtitle="a page scrolling down the screen, in place of a clip">
+        <label title="How wide a comic page is shown, as a share of the screen. Wider: more of the page to scroll through, but a softer picture - the scans are small.">
+          Page width
+        </label>
+        <select
+          style={{ width: "auto" }}
+          value={settings.comic_width}
+          disabled={busy}
+          onChange={(e) => save({ comic_width: Number(e.target.value) })}
+        >
+          {[0.4, 0.45, 0.5, 0.55, 0.6, 0.7].map((n) => (
+            <option key={n} value={n}>
+              {Math.round(n * 100)}% of the screen
+            </option>
+          ))}
+        </select>
+        <p className="hint" style={{ marginTop: "0.2rem", marginBottom: 0 }}>
+          Wider: more of the page to scroll through, but a softer picture - the scans are small.
+        </p>
       </Section>
 
       <p className="hint" style={{ marginTop: "0.75rem", marginBottom: 0 }}>

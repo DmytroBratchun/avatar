@@ -8,7 +8,9 @@ from app.db.models import Scene, Source, TranscriptChunk
 from app.db.session import get_db
 from app.pipeline.runner import dequeue_source
 from app.schemas.scenes import ScanFolderIn, ScanFolderResult, SourceCreateIn, SourceOut, SourceUpdateIn
+from app.services import comics
 from app.services.episode_parser import find_video_files, parse_episode_info
+from app.services.universes import add_comic, get_universe
 from app.services.runtime_settings import caption_only_undescribed
 
 
@@ -41,6 +43,24 @@ def create_source(payload: SourceCreateIn, db: Session = Depends(get_db)) -> Sou
         episode_title=payload.episode_title,
         status="pending",
     )
+    if comics.is_comic_file(payload.file_path):
+        # A comic: one PDF is one part of a series. The series is its "show" and is
+        # filed under a universe's comics, apart from the shows footage comes from.
+        title, number, universe = comics.name_from_file(payload.file_path)
+        universe = get_universe(payload.universe) or universe
+        if universe is None:
+            raise HTTPException(400, "Could not tell which universe this comic belongs to - give it in the request")
+        try:
+            comics.page_count(payload.file_path)
+        except Exception as exc:
+            raise HTTPException(400, f"Not a readable PDF: {exc}")
+        source.kind = "comic"
+        source.show_title = payload.show_title or title
+        if source.episode_number is None:
+            source.episode_number = number
+        if not source.episode_title and source.episode_number is not None:
+            source.episode_title = f"Part {source.episode_number}"
+        add_comic(universe.id, source.show_title)
     db.add(source)
     db.flush()
     db.refresh(source)
@@ -230,7 +250,7 @@ def prepare_source(source_id: int, visual: bool = True, db: Session = Depends(ge
     source.status = "paused"
     source.error_message = None
     source.current_stage_detail = None
-    if visual:
+    if visual and source.kind != "comic":  # a comic's pages have no visual index
         source.visual_reindex_requested = True
     db.flush()
     db.refresh(source)

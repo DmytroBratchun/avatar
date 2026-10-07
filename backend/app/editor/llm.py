@@ -7,7 +7,7 @@ from app.services.runtime_settings import editor_llm_model
 
 
 def run_claude_json(
-    prompt: str, schema: dict, cwd: Path, timeout: int = 300, model: str | None = None
+    prompt: str, schema: dict, cwd: Path, timeout: int = 300, model: str | None = None, tools: list[str] | None = None
 ) -> tuple[dict, float | None]:
     """One text-only headless Claude Code call returning schema-validated JSON,
     billed to the Claude subscription like captioning. The model comes from
@@ -15,7 +15,8 @@ def run_claude_json(
 
     The prompt goes over stdin, not argv - a whole narration transcript blows past
     Windows' ~32k command-line limit. cwd should be outside this repo so the call
-    doesn't load the repo's CLAUDE.md as context."""
+    doesn't load the repo's CLAUDE.md as context. tools: e.g. ["Read"], for a call
+    that has to look at images; none by default."""
     env = os.environ.copy()
     env.pop("ANTHROPIC_API_KEY", None)
 
@@ -27,7 +28,8 @@ def run_claude_json(
             *(["--model", model] if model else []),
             "--output-format", "json",
             "--json-schema", json.dumps(schema),
-            "--tools", "",
+            "--tools", ",".join(tools or []),
+            *(["--allowedTools", ",".join(tools)] if tools else []),
             "--no-session-persistence",
         ],
         input=prompt,

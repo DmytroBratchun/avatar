@@ -303,6 +303,11 @@ function SourceRow({ source, columns }: { source: SourceOut; columns: ColumnSett
         onMouseLeave={(e) => (e.currentTarget.style.textDecorationColor = "transparent")}
       >
         {source.episode_title ?? source.title ?? source.file_path}
+        {source.kind === "comic" && (
+          <span className="badge" style={{ marginLeft: "0.4rem" }} title="A comic: its pages are indexed like scenes, by what happens on them">
+            comic
+          </span>
+        )}
       </td>
       {columns.status && (
         <td>
@@ -523,6 +528,15 @@ function AddSourcesPanel({ onClose }: { onClose: () => void }) {
 
 const UNKNOWN_SHOW = "Unsorted";
 
+// All comics sit under one entry of the shows list, with each series a level below
+// it - in place of an episode's season.
+const COMICS = "Comics";
+
+function shelf(s: { kind?: string; show_title: string | null; book: number | null }): [string, string] {
+  if (s.kind === "comic") return [COMICS, s.show_title ?? UNKNOWN_SHOW];
+  return [s.show_title ?? UNKNOWN_SHOW, s.book != null ? `Book ${s.book}` : "Unsorted"];
+}
+
 export default function LibraryPage() {
   const { data: sources } = useQuery({
     queryKey: ["sources"],
@@ -558,14 +572,14 @@ export default function LibraryPage() {
   const tree = useMemo(() => {
     const byShow = new Map<string, Map<string, number>>();
     for (const s of sources ?? []) {
-      const show = s.show_title ?? UNKNOWN_SHOW;
-      const book = s.book != null ? `Book ${s.book}` : "Unsorted";
+      const [show, book] = shelf(s);
       if (!byShow.has(show)) byShow.set(show, new Map());
       const books = byShow.get(show)!;
       books.set(book, (books.get(book) ?? 0) + 1);
     }
     return Array.from(byShow.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
+      // comics last, under one heading, however many series there are
+      .sort(([a], [b]) => Number(a === COMICS) - Number(b === COMICS) || a.localeCompare(b))
       .map(([show, books]) => ({
         show,
         total: Array.from(books.values()).reduce((a, b) => a + b, 0),
@@ -576,12 +590,9 @@ export default function LibraryPage() {
   const filteredSources = useMemo(() => {
     if (!sources) return sources;
     return sources.filter((s) => {
-      const show = s.show_title ?? UNKNOWN_SHOW;
+      const [show, book] = shelf(s);
       if (selectedShow && show !== selectedShow) return false;
-      if (selectedBook) {
-        const book = s.book != null ? `Book ${s.book}` : "Unsorted";
-        if (book !== selectedBook) return false;
-      }
+      if (selectedBook && book !== selectedBook) return false;
       return true;
     });
   }, [sources, selectedShow, selectedBook]);

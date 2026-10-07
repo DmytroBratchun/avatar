@@ -199,6 +199,11 @@ class Lumean:
         task = {"prompt": prompt, "n_variants": variants, "music_length_ms": length_ms, "force_instrumental": instrumental}
         return self._request("POST", "/orders", json={"task_type": "music", "task_data": task})
 
+    def create_sfx_order(self, text: str, seconds: float | None = None, prompt_influence: float = 0.3) -> dict:
+        """Orders one sound effect from a description (English works best); one file."""
+        task = {"text": text, "duration_seconds": seconds, "prompt_influence": prompt_influence}
+        return self._request("POST", "/orders", json={"task_type": "sfx", "task_data": task})
+
     def order(self, order_id: str) -> dict:
         return self._request("GET", f"/orders/{order_id}")
 

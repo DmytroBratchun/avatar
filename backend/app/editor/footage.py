@@ -15,7 +15,8 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.db.models import Scene, Shot, Source
-from app.editor.store import Candidate, Project, Slot, project_shows
+from app.editor.comic_pages import page_candidate
+from app.editor.store import Candidate, Project, Slot, project_comics, project_shows
 from app.pipeline.stages.extract_keyframes import _OFFSETS_BY_COUNT
 from app.services.embeddings import embed_text, embed_text_for_visual_search
 from app.vectorstore.sqlite_vec_client import _serialize, knn_text, knn_visual, knn_wiki
@@ -52,6 +53,7 @@ class SearchContext:
             )
 
         self.project_shows = shows
+        self.comics = set(project_comics(project))
         self._by_shows: dict[tuple[str, ...], list[int] | None] = {}
 
         rng = random.Random(0)
@@ -62,7 +64,7 @@ class SearchContext:
     def candidates_for(self, shows: list[str]) -> list[int] | None:
         """Scene ids a clip may come from: the shows chosen for that clip, limited to
         the ones the project allows. No (valid) choice = the whole project."""
-        wanted = tuple(sorted(s for s in shows if not self.project_shows or s in self.project_shows))
+        wanted = tuple(sorted(s for s in shows if not self.project_shows or s in self.project_shows or s in self.comics))
         if not wanted:
             return self.candidate_ids
         if wanted not in self._by_shows:
@@ -129,6 +131,8 @@ def fit_to_duration(db: Session, slot: Slot) -> None:
     duration = slot.end - slot.start
     for candidate in slot.candidates:
         candidate.clip_end = round(candidate.clip_start + duration, 3)
+        if candidate.kind != "video":
+            continue  # a comic page or a photo has no shots to cut across
         candidate.slivers = count_slivers(db, candidate.source_id, candidate.clip_start, candidate.clip_end)
 
 
@@ -164,7 +168,9 @@ def end_on_a_cut(db: Session, slot: Slot, following: Slot, max_clip_seconds: flo
     return True
 
 
-def _clip_window(db: Session, scene: Scene, source: Source, duration: float, anchor_on_keyframe: bool) -> tuple[float, float]:
+def _clip_window(
+    db: Session, scene: Scene, source: Source, duration: float, anchor_on_keyframe: bool, anchor: float | None = None
+) -> tuple[float, float]:
     """Where in the source to cut `duration` seconds for this scene.
 
     The clip has to contain the moment the scene was found by (a visual match is a
@@ -174,13 +180,15 @@ def _clip_window(db: Session, scene: Scene, source: Source, duration: float, anc
     So every sensible position is tried - centred on the moment, and starting or
     ending exactly on each nearby cut - and the one with no sliver of a shot wins,
     then the one with the fewest cuts, then the one that stays inside the scene and
-    keeps the moment nearest its middle."""
+    keeps the moment nearest its middle. anchor: the moment, when it is known (a
+    specific moment found by reading the episode)."""
     scene_length = scene.end_time - scene.start_time
     offsets = _OFFSETS_BY_COUNT.get(len(scene.keyframe_paths or []))
-    if anchor_on_keyframe and offsets:
-        anchor = scene.start_time + scene_length * offsets[0]
-    else:
-        anchor = scene.start_time + scene_length / 2
+    if anchor is None:
+        if anchor_on_keyframe and offsets:
+            anchor = scene.start_time + scene_length * offsets[0]
+        else:
+            anchor = scene.start_time + scene_length / 2
 
     source_end = source.duration_seconds or scene.end_time
     latest_start = max(0.0, source_end - duration)
@@ -216,15 +224,19 @@ def _clip_window(db: Session, scene: Scene, source: Source, duration: float, anc
     return round(start, 3), round(start + duration, 3)
 
 
-def search_slot(ctx: SearchContext, slot: Slot) -> list[Candidate]:
-    """Ranked candidates for one slot, best first (no reuse handling here)."""
+def search_slot(ctx: SearchContext, slot: Slot, scene_ids: list[int] | None = None) -> list[Candidate]:
+    """Ranked candidates for one slot, best first (no reuse handling here).
+    scene_ids: search only these scenes (e.g. the scenes of one episode)."""
     db = ctx.db
     text_scores: dict[int, float] = {}
     wiki_scores: dict[int, float] = {}
     visual_scores: dict[int, float] = {}
-    candidate_ids = ctx.candidates_for(slot.shows)
+    candidate_ids = scene_ids if scene_ids is not None else ctx.candidates_for(slot.shows)
+    # a shot written for a comic: pages are found by what happens on them, whatever
+    # the project's search mode, and have no visual index to search
+    in_comic = bool(slot.shows) and all(show in ctx.comics for show in slot.shows)
 
-    if ctx.mode in ("smart_hybrid", "text") and slot.text_query.strip():
+    if (ctx.mode in ("smart_hybrid", "text") or in_comic) and slot.text_query.strip():
         # the narrative query is searched in both text indexes: paid captions (few
         # episodes) and the fan-wiki descriptions (nearly all of them, free)
         vector = embed_text(slot.text_query)
@@ -232,7 +244,7 @@ def search_slot(ctx: SearchContext, slot: Slot) -> list[Candidate]:
         text_scores = _scored(hits, _background(db, "scene_text_vec", ctx.text_sample, vector))
         hits = knn_wiki(db, vector, candidate_ids, k=KNN_K)
         wiki_scores = _scored(hits, _background(db, "scene_wiki_vec", ctx.wiki_sample, vector))
-    if ctx.mode in ("smart_hybrid", "visual") and slot.visual_query.strip():
+    if ctx.mode in ("smart_hybrid", "visual") and slot.visual_query.strip() and not in_comic:
         vector = embed_text_for_visual_search(slot.visual_query)
         hits = knn_visual(db, vector, candidate_ids, k=KNN_K)
         visual_scores = _scored(hits, _background(db, "scene_visual_vec", ctx.visual_sample, vector))
@@ -262,6 +274,10 @@ def search_slot(ctx: SearchContext, slot: Slot) -> list[Candidate]:
         text_score = text_scores.get(scene_id)
         wiki_score = wiki_scores.get(scene_id)
         visual_score = visual_scores.get(scene_id)
+        if source.kind == "comic":
+            if scene.keyframe_paths:
+                candidates.append(page_candidate(scene, source, duration, combined[scene_id], text_score))
+            continue
         # cut around the keyframe unless a text index was the stronger reason for the match
         best_text = max((s for s in (text_score, wiki_score) if s is not None), default=None)
         on_keyframe = visual_score is not None and (best_text is None or visual_score >= best_text)

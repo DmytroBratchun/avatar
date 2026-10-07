@@ -259,6 +259,88 @@ def _frame_count(start: float, end: float) -> int:
     return max(1, round(end * FPS) - round(start * FPS))
 
 
+def _comic_args(
+    candidate: Candidate, frames: int, settings: RenderSettings, encode: list[str],
+    track: Path | None, track_frame: int, track_identity: list | None,
+) -> tuple[list[str], dict]:
+    """A page of a comic in place of a clip: the page as a column in the middle of
+    the screen, scrolling from its top to its bottom over the clip's length, with no
+    frame around it. Behind it, blurred and dimmed, is the background scenery when
+    the project has it, otherwise the page itself."""
+    with Image.open(candidate.image_path) as image:
+        page_w, page_h = image.size
+    width = _even(WIDTH * min(1.0, max(0.2, settings.comic_width)))
+    height = _even(width * page_h / page_w)
+    travel = max(0, height - HEIGHT)  # how far the page has to move to show its bottom
+    seconds = frames / FPS
+    # eased: the page starts and stops gently rather than at full speed
+    progress = f"min(1,t/{seconds:.4f})"
+    y = f"-{travel}*({progress}*{progress}*(3-2*{progress}))" if travel else f"{(HEIGHT - height) // 2}"
+    keep = 1.0 - settings.dim
+    sigma = max(0.1, settings.blur / 4)
+    inputs = ["-loop", "1", "-framerate", f"{FPS_NUM}/{FPS_DEN}", "-i", candidate.image_path]
+    page = f"scale={width}:{height}:flags=lanczos,setsar=1"
+    identity = {
+        "comic": candidate.image_path, "frames": frames, "width": width, "blur": settings.blur,
+        "dim": settings.dim, "v": ENCODE_VERSION,
+    }
+    if track is None:
+        graph = (
+            f"[0:v]split[a][b];[a]scale={WIDTH // 4}:{HEIGHT // 4}:force_original_aspect_ratio=increase,"
+            f"crop={WIDTH // 4}:{HEIGHT // 4},gblur=sigma={max(sigma, 6):.2f},scale={WIDTH}:{HEIGHT},setsar=1,"
+            f"colorchannelmixer=rr={keep * 0.6:.3f}:gg={keep * 0.6:.3f}:bb={keep * 0.6:.3f}[bg];[b]{page}[fg]"
+        )
+    else:
+        seek_to = max(0.0, (track_frame - 0.4) / FPS)
+        inputs += ["-ss", f"{seek_to:.5f}", "-i", str(track)]
+        graph = (
+            f"[0:v]{page}[fg];"
+            f"[1:v]fps={FPS_NUM}/{FPS_DEN},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop=-1,gblur=sigma={sigma:.2f},"
+            f"scale={WIDTH}:{HEIGHT},setsar=1,colorchannelmixer=rr={keep:.3f}:gg={keep:.3f}:bb={keep:.3f}[bg]"
+        )
+        identity["background"] = track_identity
+    graph += f";[bg][fg]overlay=x={(WIDTH - width) // 2}:y='{y}'[out]"
+    return [*inputs, "-filter_complex", graph, "-map", "[out]", *encode], identity
+
+
+def _photo_args(candidate: Candidate, frames: int, settings: RenderSettings, encode: list[str]) -> tuple[list[str], dict]:
+    """A photo in place of a clip, with no frame around it. A wide photo fills the
+    screen and pans slowly across; any other is shown whole in the middle, over a
+    blurred and darkened copy of itself."""
+    with Image.open(candidate.image_path) as image:
+        photo_w, photo_h = image.size
+    seconds = frames / FPS
+    progress = f"min(1,t/{seconds:.4f})"
+    eased = f"({progress}*{progress}*(3-2*{progress}))"
+    inputs = ["-loop", "1", "-framerate", f"{FPS_NUM}/{FPS_DEN}", "-i", candidate.image_path]
+    identity = {"photo": candidate.image_path, "frames": frames, "v": ENCODE_VERSION}
+    if photo_w / photo_h >= 1.5:
+        # cover the screen with a little to spare, and pan across that spare width
+        scale = max(WIDTH / photo_w, HEIGHT / photo_h) * 1.08
+        width, height = _even(photo_w * scale), _even(photo_h * scale)
+        travel = width - WIDTH
+        graph = (
+            f"color=black:s={WIDTH}x{HEIGHT}:r={FPS_NUM}/{FPS_DEN}[bg];"
+            f"[0:v]scale={width}:{height}:flags=lanczos,setsar=1[fg];"
+            f"[bg][fg]overlay=x='-{travel}*{eased}':y={(HEIGHT - height) // 2}:shortest=1[out]"
+        )
+        identity["pan"] = True
+    else:
+        scale = min(WIDTH * 0.9 / photo_w, HEIGHT * 0.9 / photo_h)
+        width, height = _even(photo_w * scale), _even(photo_h * scale)
+        keep = 1.0 - settings.dim
+        sigma = max(6.0, settings.blur / 4)
+        graph = (
+            f"[0:v]split[a][b];[a]scale={WIDTH // 4}:{HEIGHT // 4}:force_original_aspect_ratio=increase,"
+            f"crop={WIDTH // 4}:{HEIGHT // 4},gblur=sigma={sigma:.2f},scale={WIDTH}:{HEIGHT},setsar=1,"
+            f"colorchannelmixer=rr={keep * 0.6:.3f}:gg={keep * 0.6:.3f}:bb={keep * 0.6:.3f}[bg];"
+            f"[b]scale={width}:{height}:flags=lanczos,setsar=1[fg];"
+            f"[bg][fg]overlay=x={(WIDTH - width) // 2}:y={(HEIGHT - height) // 2}[out]"
+        )
+        identity.update(blur=settings.blur, dim=settings.dim)
+    return [*inputs, "-filter_complex", graph, "-map", "[out]", *encode], identity
+
+
 def _segment_args(
     candidate: Candidate | None,
     frames: int,
@@ -279,6 +361,11 @@ def _segment_args(
     if candidate is None:
         args = ["-f", "lavfi", "-i", f"color=black:s={WIDTH}x{HEIGHT}:r={FPS_NUM}/{FPS_DEN}", *encode]
         return args, {"blank": True, "frames": frames, "v": ENCODE_VERSION}
+
+    if candidate.kind == "comic" and candidate.image_path:
+        return _comic_args(candidate, frames, settings, encode, track, track_frame, track_identity)
+    if candidate.kind == "photo" and candidate.image_path:
+        return _photo_args(candidate, frames, settings, encode)
 
     cw, ch, cx, cy = source_crop(candidate.file_path)
     # Timestamps are reset to zero on every stream: after a seek the first frame of an
@@ -434,6 +521,7 @@ def preview_clips(project: Project, fmt: str | None) -> tuple[str, list[tuple[Ca
     ]
     if fmt is None:
         return "project", own
+    own = [item for item in own if item[0].kind == "video"]  # a comic page or a photo has no footage format
     matching = [item for item in own if footage_format(item[0].file_path) == fmt]
     if matching:
         return "project", matching
@@ -752,6 +840,12 @@ def render_project(project_id: str, report) -> None:
     output = output_dir / "video.mp4"
     partial = output_dir / "video.part.mp4"
     narration = str(folder / project.audio_file)
+    if project.settings.sound_effects:
+        from app.editor.sounds import build_narration
+
+        report("adding sound effects")
+        narration = str(build_narration(project, folder) or narration)
+        report("joining clips with the narration")
     music_track = None
     if project.settings.music_enabled and project.music:
         from app.editor.music import build_track

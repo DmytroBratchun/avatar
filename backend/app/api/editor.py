@@ -42,6 +42,7 @@ class ProjectCreateIn(BaseModel):
 class ProjectUpdateIn(BaseModel):
     title: str | None = None
     script_text: str | None = None
+    footage_notes: str | None = None
     shows: list[str] | None = None
     layout: str | None = None
     search_mode: str | None = None
@@ -59,6 +60,9 @@ class ProjectUpdateIn(BaseModel):
     quote_cuts: bool | None = None
     music_enabled: bool | None = None
     music_level: float | None = None
+    comic_width: float | None = None
+    sound_effects: bool | None = None
+    sfx_volume: float | None = None
 
 
 def _load(project_id: str) -> Project:
@@ -128,6 +132,8 @@ def update_project(project_id: str, payload: ProjectUpdateIn) -> Project:
             p.title = data["title"].strip()
         if "script_text" in data:
             p.script_text = data["script_text"] or None
+        if "footage_notes" in data:
+            p.footage_notes = (data["footage_notes"] or "").strip() or None
         if data.get("shows") is not None:
             p.shows = data["shows"]
         if data.get("layout"):
@@ -163,6 +169,12 @@ def update_project(project_id: str, payload: ProjectUpdateIn) -> Project:
             p.settings.music_enabled = data["music_enabled"]
         if data.get("music_level") is not None:
             p.settings.music_level = min(40.0, max(6.0, data["music_level"]))
+        if data.get("comic_width") is not None:
+            p.settings.comic_width = min(1.0, max(0.3, data["comic_width"]))
+        if data.get("sound_effects") is not None:
+            p.settings.sound_effects = data["sound_effects"]
+        if data.get("sfx_volume") is not None:
+            p.settings.sfx_volume = min(30.0, max(0.0, data["sfx_volume"]))
 
     return store.update_project(project_id, apply)
 
@@ -239,8 +251,11 @@ def get_transcript(project_id: str) -> list[Word]:
 
 
 @router.post("/projects/{project_id}/run/{stage}", response_model=Project)
-def run_stage(project_id: str, stage: str) -> Project:
-    """Runs the stage now, or queues it if the project is already running one."""
+def run_stage(project_id: str, stage: str, unlock: bool = False) -> Project:
+    """Runs the stage now, or queues it if the project is already running one.
+    unlock (shot queries, find footage): re-pick the clips the user locked as well;
+    the locks are dropped when the stage starts, not now, so a stage still running
+    ahead of it can't write them back."""
     project = _load(project_id)
     # A stage queued behind others can't be checked yet - what it needs may be exactly
     # what the stages ahead of it produce. It checks for itself when its turn comes.
@@ -260,6 +275,8 @@ def run_stage(project_id: str, stage: str) -> Project:
             raise HTTPException(400, "Find footage first")
         if stage == "select" and not any(slot.text_query or slot.visual_query for b in project.beats for slot in b.slots):
             raise HTTPException(400, "Write shot queries first")
+    if unlock and stage in ("queries", "select"):
+        store.update_project(project_id, lambda p: p.unlock_before.append(stage) if stage not in p.unlock_before else None)
     try:
         return jobs.start(project_id, stage)
     except KeyError:
@@ -270,6 +287,7 @@ def run_stage(project_id: str, stage: str) -> Project:
 def unqueue_stage(project_id: str, stage: str) -> Project:
     """Takes a waiting stage off the project's queue (the running one is not affected)."""
     _load(project_id)
+    store.update_project(project_id, lambda p: p.unlock_before.remove(stage) if stage in p.unlock_before else None)
     return jobs.unqueue(project_id, stage)
 
 
@@ -486,6 +504,74 @@ def replan_music(project_id: str) -> Project:
 def get_music_file(project_id: str, name: str):
     _load(project_id)
     base = (store.project_dir(project_id) / "music").resolve()
+    path = (base / name).resolve()
+    if path.parent != base or not path.is_file():
+        raise HTTPException(404, "File not found")
+    return FileResponse(path)
+
+
+# --- standard sound effects (shared by all projects) ---------------------------
+
+
+class SoundOut(BaseModel):
+    name: str
+    label: str
+    used_for: str
+    prompt: str
+    files: list[str]
+
+
+def _sounds() -> list[SoundOut]:
+    from app.editor import sounds
+
+    library = sounds.load_library()
+    return [
+        SoundOut(name=s.name, label=s.label, used_for=s.used_for, prompt=s.prompt, files=library.get(s.name, []))
+        for s in sounds.STANDARD
+    ]
+
+
+@router.get("/sounds", response_model=list[SoundOut])
+def list_sounds() -> list[SoundOut]:
+    try:
+        return _sounds()
+    except store.RootNotConfigured:
+        return []
+
+
+@router.post("/sounds/{name}/generate", response_model=list[SoundOut])
+def generate_sound(name: str) -> list[SoundOut]:
+    """Generates the sound's variants through Lumean (paid, a few seconds of sound
+    each), replacing the ones it had. Every project uses them from then on."""
+    from app.editor import sounds
+
+    if not current_lumean_api_key():
+        raise HTTPException(400, "Add the Lumean API key in Settings first")
+    try:
+        sounds.generate(name)
+    except KeyError:
+        raise HTTPException(404, f"Unknown sound: {name}")
+    except (LumeanError, RuntimeError) as exc:
+        raise HTTPException(502, str(exc))
+    return _sounds()
+
+
+@router.get("/sounds/files/{name}")
+def get_sound_file(name: str):
+    from app.editor import sounds
+
+    base = sounds.library_dir().resolve()
+    path = (base / name).resolve()
+    if path.parent != base or not path.is_file():
+        raise HTTPException(404, "File not found")
+    return FileResponse(path)
+
+
+@router.get("/projects/{project_id}/photos/{name}")
+def get_photo_file(project_id: str, name: str):
+    """A photo fetched from Wikimedia Commons for one of the project's shots."""
+    _load(project_id)
+    base = (store.project_dir(project_id) / "photos").resolve()
     path = (base / name).resolve()
     if path.parent != base or not path.is_file():
         raise HTTPException(404, "File not found")

@@ -27,6 +27,9 @@ class Source(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     file_path: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    # "video" (an episode or film) or "comic" (a PDF whose pages are indexed like
+    # scenes, see services/comics.py)
+    kind: Mapped[str] = mapped_column(String, default="video", server_default="video", nullable=False)
     title: Mapped[str | None] = mapped_column(String, nullable=True)
     show_title: Mapped[str | None] = mapped_column(String, nullable=True)
     book: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -127,6 +130,11 @@ class Scene(Base):
 
     source: Mapped[Source] = relationship(back_populates="scenes")
     scene_shots: Mapped[list["SceneShot"]] = relationship(back_populates="scene", cascade="all, delete-orphan")
+
+    @property
+    def kind(self) -> str:
+        """"video", or "comic" when this scene is a page of a comic."""
+        return self.source.kind if self.source is not None else "video"
 
 
 class TranscriptChunk(Base):

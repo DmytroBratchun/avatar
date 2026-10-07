@@ -18,6 +18,8 @@ class SceneOut(BaseModel):
 
     id: int
     source_id: int
+    # "video", or "comic": a page of a comic, whose start_time is its number from 0
+    kind: str = "video"
     show_title: str | None = None
     book: int | None
     episode_number: int | None
@@ -64,6 +66,10 @@ class SceneTechnicalOut(BaseModel):
 class SceneDetailOut(SceneOut):
     transcript_lines: list[TranscriptLineOut] = []
     source_file_path: str | None = None
+    source_file_exists: bool = False
+    episode_title: str | None = None
+    # comics: how many pages the part has
+    page_count: int | None = None
     technical: SceneTechnicalOut = SceneTechnicalOut()
 
 
@@ -93,6 +99,7 @@ class SourceOut(BaseModel):
 
     id: int
     file_path: str
+    kind: str = "video"  # "video" | "comic"
     title: str | None
     show_title: str | None
     book: int | None
@@ -121,6 +128,9 @@ class SourceOut(BaseModel):
 
 class SourceCreateIn(BaseModel):
     file_path: str
+    # for a comic (a PDF): the universe it belongs to; worked out from the file
+    # name when not given
+    universe: str | None = None
     title: str | None = None
     show_title: str | None = None
     book: int | None = None

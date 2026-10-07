@@ -4,10 +4,12 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import type { EditorBeat, EditorJob, EditorProject, EditorStage, LookFormat } from "../api/client";
 import LookPreview from "../components/LookPreview";
+import FootageNotesCard from "../components/FootageNotesCard";
 import MusicCard from "../components/MusicCard";
 import QuoteBankCard from "../components/QuoteBankCard";
 import QuotesCard, { AddQuoteCard } from "../components/QuotesCard";
 import RenderSettingsCard from "../components/RenderSettingsCard";
+import SoundEffectsCard from "../components/SoundEffectsCard";
 import { SlotEditor, SlotThumb } from "../components/SlotEditor";
 import VoiceoverCard from "../components/VoiceoverCard";
 
@@ -66,6 +68,34 @@ function Eta({ at }: { at: number }) {
   );
 }
 
+// Asked before Shot queries / Find footage when some clips are locked: keep them, or
+// let the stage pick those again too.
+function UnlockDialog({ stage, locked, onAnswer }: { stage: EditorStage; locked: number; onAnswer: (unlock: boolean | null) => void }) {
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}
+      onClick={() => onAnswer(null)}
+    >
+      <div className="card" style={{ width: "460px", maxWidth: "90vw" }} onClick={(e) => e.stopPropagation()}>
+        <h3 style={{ marginTop: 0 }}>{stage === "queries" ? "Shot queries" : "Find footage"}</h3>
+        <p style={{ marginTop: 0 }}>
+          {locked} clip{locked === 1 ? " is" : "s are"} locked - picked or re-searched by you. Keep {locked === 1 ? "it" : "them"}, or
+          let this run pick {locked === 1 ? "it" : "them"} again too?
+        </p>
+        <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end", flexWrap: "wrap" }}>
+          <button className="ghost" onClick={() => onAnswer(null)}>
+            Cancel
+          </button>
+          <button onClick={() => onAnswer(true)}>Re-pick all</button>
+          <button className="primary" autoFocus onClick={() => onAnswer(false)}>
+            Keep locked
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function StageRow({
   label,
   description,
@@ -106,22 +136,15 @@ function StageRow({
   return (
     <div style={{ padding: "0.4rem 0", borderTop: "1px solid var(--border)" }}>
       {/* name, status, then the button straight after the status: the status column has
-          a fixed width, so the buttons of all stages line up */}
-      <div style={{ display: "grid", gridTemplateColumns: "7.5rem 19rem 5.5rem 1.2rem", alignItems: "center", gap: "0.6rem", justifyContent: "start" }}>
+          a fixed width, so the buttons of all stages line up. While the stage runs, how far
+          along it is goes after the loader, next to it */}
+      <div style={{ display: "grid", gridTemplateColumns: "7.5rem 19rem 5.5rem 1.2rem auto", alignItems: "center", gap: "0.6rem", justifyContent: "start" }}>
         <strong style={{ fontSize: "0.9rem", cursor: "help" }} title={description}>
           {label}
         </strong>
         <span className="hint" style={{ margin: 0 }}>
           {running ? (
-            <>
-              <span className="badge accent">running</span> {job?.detail} · {elapsed(job?.started_at ?? "", now)}
-              {eta != null && (
-                <>
-                  {" · "}
-                  <Eta at={eta} />
-                </>
-              )}
-            </>
+            <span className="badge accent">running</span>
           ) : queuePosition > 0 ? (
             <span className="badge">queued #{queuePosition}</span>
           ) : (
@@ -160,6 +183,17 @@ function StageRow({
           ) : (
             <span className="spinner" title="Working…" />
           ))}
+        {running && (
+          <span className="hint" style={{ margin: 0 }}>
+            {job?.detail} · {elapsed(job?.started_at ?? "", now)}
+            {eta != null && (
+              <>
+                {" · "}
+                <Eta at={eta} />
+              </>
+            )}
+          </span>
+        )}
       </div>
       {job?.status === "error" && (
         <p className="error-text" style={{ margin: "0.3rem 0 0" }}>
@@ -211,7 +245,7 @@ function BeatRow({
         <td style={{ verticalAlign: "top" }}>
           <div style={{ display: "flex", gap: "0.3rem" }}>
             {beat.slots.map((s, i) => (
-              <SlotThumb key={i} slot={s} active={openSlot === i} onClick={() => setOpenSlot(openSlot === i ? null : i)} />
+              <SlotThumb key={i} projectId={projectId} slot={s} active={openSlot === i} onClick={() => setOpenSlot(openSlot === i ? null : i)} />
             ))}
             {beat.backgrounds.length > 0 && (
               <div style={{ width: "64px", marginLeft: "0.4rem", opacity: 0.75 }} title={`Background: ${beat.background_query}`}>
@@ -278,9 +312,11 @@ export default function EditorProjectPage() {
   const setProject = (p: EditorProject) => queryClient.setQueryData(["editorProject", id], p);
 
   const runMutation = useMutation({
-    mutationFn: (stage: EditorStage) => api.runEditorStage(id, stage),
+    mutationFn: ({ stage, unlock = false }: { stage: EditorStage; unlock?: boolean }) => api.runEditorStage(id, stage, unlock),
     onSuccess: setProject,
   });
+  // a stage that keeps locked clips, waiting for the answer to "keep them?"
+  const [askUnlock, setAskUnlock] = useState<EditorStage | null>(null);
   const settingsMutation = useMutation({
     mutationFn: (payload: Parameters<typeof api.updateEditorProject>[1]) => api.updateEditorProject(id, payload),
     onSuccess: setProject,
@@ -328,6 +364,18 @@ export default function EditorProjectPage() {
 
   const running = project.job?.status === "running";
   const busy = running || runMutation.isPending || uploadMutation.isPending;
+  // attributions of the photos the video shows, once each, in order of appearance
+  const photoCredits = Array.from(
+    new Set(
+      project.beats.flatMap((beat) =>
+        beat.slots.flatMap((slot) => {
+          const c = slot.selected != null ? slot.candidates[slot.selected] : null;
+          return c?.kind === "photo" && c.credit ? [c.credit] : [];
+        }),
+      ),
+    ),
+  );
+  const lockedCount = project.beats.reduce((n, beat) => n + beat.slots.filter((slot) => slot.locked).length, 0);
   const mutationError = (runMutation.error ?? uploadMutation.error) as Error | null;
 
   const projectUniverse = universes?.find((u) => u.id === project.universe) ?? universes?.find((u) => project.shows.some((s) => u.shows.includes(s))) ?? universes?.[0];
@@ -353,8 +401,12 @@ export default function EditorProjectPage() {
     return tracks.reduce((sum, t) => sum + (t.end - t.start), 0) - 3 * Math.max(0, tracks.length - 1) >= block.end - block.start + 3;
   }).length;
   // a beat whose number of clips no longer matches the limit was split under an older setting
+  // (a beat told from a comic has as many pages as its story needs, whatever the limit)
   const clipsStale = project.beats.some(
-    (b) => b.slots.length > 0 && b.slots.length !== Math.max(1, Math.ceil((b.end - b.start) / project.settings.max_clip_seconds - 1e-6))
+    (b) =>
+      b.slots.length > 0 &&
+      !b.slots.every((s) => s.selected != null && s.candidates[s.selected]?.kind === "comic") &&
+      b.slots.length !== Math.max(1, Math.ceil((b.end - b.start) / project.settings.max_clip_seconds - 1e-6))
   );
   const stages: { key: EditorStage; label: string; description: string; state: string; done: boolean; ready: boolean }[] = [
     {
@@ -392,7 +444,7 @@ export default function EditorProjectPage() {
     {
       key: "select",
       label: "Find footage",
-      description: "Searches the index for every clip, avoiding repeats. Free, local; keeps locked clips.",
+      description: "Searches the index for every clip, avoiding repeats; keeps locked clips. Free and local, except shots that want a photo: those are searched on Wikimedia Commons and checked by Claude (one call per photo, cached).",
       state: slotsFilled > 0 ? `${slotsFilled} / ${slots.length} clips filled` : "not run",
       done: slotsFilled > 0,
       ready: slotsWithQueries > 0,
@@ -442,7 +494,7 @@ export default function EditorProjectPage() {
   const renderButton = (
     <button
       className="small primary"
-      onClick={() => runMutation.mutate("render")}
+      onClick={() => runMutation.mutate({ stage: "render" })}
       disabled={project.job?.stage === "render" && running ? true : project.queue.includes("render") || (slotsFilled === 0 && !running)}
     >
       {project.queue.includes("render") ? "Render queued" : running ? "Queue render" : project.rendered_at ? "Re-render" : "Render"}
@@ -526,6 +578,8 @@ export default function EditorProjectPage() {
             </div>
           </div>
 
+          <FootageNotesCard key={project.id} project={project} onChange={setProject} />
+
           <div className="card" style={{ marginTop: "0.75rem" }}>
             <h3>Stages</h3>
             <p className="hint" style={{ marginTop: 0 }}>
@@ -566,7 +620,11 @@ export default function EditorProjectPage() {
                 // when something is running or queued, what this stage needs may be on its way
                 canRun={!!project.audio_file && (stage.ready || running || project.queue.length > 0)}
                 somethingRunning={running}
-                onRun={() => runMutation.mutate(stage.key)}
+                onRun={() =>
+                  (stage.key === "queries" || stage.key === "select") && lockedCount > 0
+                    ? setAskUnlock(stage.key)
+                    : runMutation.mutate({ stage: stage.key })
+                }
                 onUnqueue={() => unqueueMutation.mutate(stage.key)}
               />
             ))}
@@ -575,7 +633,21 @@ export default function EditorProjectPage() {
       )}
 
       {tab === "music" && (
-        <MusicCard project={project} disabled={busy} stale={musicStale} onChange={setProject} onRun={() => runMutation.mutate("music")} />
+        <>
+          <MusicCard project={project} disabled={busy} stale={musicStale} onChange={setProject} onRun={() => runMutation.mutate({ stage: "music" })} />
+          <SoundEffectsCard project={project} disabled={busy} onChange={setProject} />
+        </>
+      )}
+
+      {askUnlock && (
+        <UnlockDialog
+          stage={askUnlock}
+          locked={lockedCount}
+          onAnswer={(unlock) => {
+            if (unlock !== null) runMutation.mutate({ stage: askUnlock, unlock });
+            setAskUnlock(null);
+          }}
+        />
       )}
 
       {tab === "voice" && <VoiceoverCard project={project} disabled={busy} onChange={setProject} />}
@@ -602,7 +674,7 @@ export default function EditorProjectPage() {
               No quotes yet. The search proposes lines from the show that would strengthen the narration; nothing is
               added to the video until you choose it.
             </p>
-            <button className="small primary" onClick={() => runMutation.mutate("quotes")} disabled={busy || project.word_count === 0}>
+            <button className="small primary" onClick={() => runMutation.mutate({ stage: "quotes" })} disabled={busy || project.word_count === 0}>
               Search for quotes
             </button>
             {project.word_count === 0 && <span className="hint"> Transcribe the narration first.</span>}
@@ -677,6 +749,16 @@ export default function EditorProjectPage() {
             <p className="hint">Not rendered yet.</p>
           )}
           {renderButton}
+          {photoCredits.length > 0 && (
+            <div style={{ marginTop: "1rem" }}>
+              <h3>Photo credits</h3>
+              <p className="hint" style={{ marginTop: 0 }}>
+                The photos in this video are from Wikimedia Commons under licences that ask to name their authors - paste this
+                into the video's description.
+              </p>
+              <textarea readOnly value={photoCredits.join("\n")} rows={Math.min(10, photoCredits.length + 1)} style={{ width: "100%" }} />
+            </div>
+          )}
         </div>
       )}
     </div>

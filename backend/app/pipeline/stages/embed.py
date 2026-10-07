@@ -29,7 +29,8 @@ def run_embedding(db: Session, source: Source) -> None:
         if scene.context_description:
             upsert_text_vector(db, scene.id, embed_text(scene.context_description))
             scene.text_embedding_model = text_embedding_model_id()
-        if scene.keyframe_paths:
+        # a comic's pages are found by what happens on them, not by how they look
+        if scene.keyframe_paths and source.kind != "comic":
             upsert_visual_vector(db, scene.id, embed_image(scene.keyframe_paths[0]))
             scene.visual_embedding_model = visual_embedding_model_id()
         scene.embedded_at = dt.datetime.now(dt.timezone.utc)

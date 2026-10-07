@@ -666,6 +666,32 @@ tbody tr:last-child td {
   gap: 0.4rem;
   position: sticky;
   top: 58px;
+  /* a sticky column taller than the window could only be scrolled with the page;
+     it scrolls on its own instead */
+  max-height: calc(100vh - 70px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* a thin, faint scrollbar that only shows itself on hover */
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 0.2s;
+}
+
+.filters:hover {
+  scrollbar-color: var(--border) transparent;
+}
+
+.filters::-webkit-scrollbar {
+  width: 6px;
+}
+
+.filters::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+}
+
+.filters:hover::-webkit-scrollbar-thumb {
+  background: var(--border);
 }
 
 .results {

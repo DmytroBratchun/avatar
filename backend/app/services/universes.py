@@ -35,6 +35,10 @@ class Universe(BaseModel):
     region_notes: str = ""
     # region -> what its scenery looks like, for choosing video backgrounds
     scenery: dict[str, str] = Field(default_factory=dict)
+    # show_title values of the comics that belong to it. Kept apart from the shows:
+    # footage is looked for in the shows, and in a comic only where the narration
+    # is about that comic
+    comics: list[str] = Field(default_factory=list)
     # what this world's music sounds like - instruments, traditions, character - for
     # composing music under a video; empty = left to what the model knows of the shows
     music_style: str = ""
@@ -115,12 +119,24 @@ def get_universe(universe_id: str | None) -> Universe | None:
     return next((u for u in _load() if u.id == universe_id), None)
 
 
+def add_comic(universe_id: str, title: str) -> None:
+    """Records that a comic belongs to a universe (done when its first part is added)."""
+    universes = _load()
+    with _lock:
+        for universe in universes:
+            if universe.id == universe_id and title not in universe.comics:
+                universe.comics.append(title)
+                UNIVERSES_PATH.write_text(
+                    json.dumps([u.model_dump() for u in universes], indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+
+
 def universe_for_show(show_title: str | None) -> Universe:
     """The universe a show belongs to. A show nobody has assigned yet gets a
     bare universe of its own - no regions, no description - so nothing from another
     world leaks into its prompts."""
     for universe in _load():
-        if show_title and show_title in universe.shows:
+        if show_title and (show_title in universe.shows or show_title in universe.comics):
             return universe
     title = show_title or "this show"
     return Universe(id="", name=title, shows=[show_title] if show_title else [])
