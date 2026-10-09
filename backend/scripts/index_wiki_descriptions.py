@@ -1,6 +1,7 @@
 """Builds the free text index from fan-wiki transcripts: gives every scene the wiki's
 account of it (Scene.wiki_description, see app/services/wiki_descriptions.py) and
-embeds that text into scene_wiki_vec. Run after scripts/import_wiki_transcripts.py.
+embeds that text into scene_wiki_vec. Run after scripts/import_wiki_transcripts.py
+(episodes) or scripts/import_wiki_comics.py (comics, where a scene is a page).
 
 Scenes that already have an up-to-date vector are skipped, so it can be stopped and
 resumed. Captions and their vectors are not touched.
@@ -58,7 +59,7 @@ def main() -> None:
                     todo.append((scene, new_text))
                 elif not new_text and (scene.wiki_description or scene.id in has_vector):
                     stale.append(scene)
-        print(f"{len(sources)} episodes, {total_scenes} scenes; {with_text} get a wiki text ({with_text / max(total_scenes, 1):.0%}); {len(todo)} to embed, {len(stale)} to remove from the index")
+        print(f"{len(sources)} episodes and comics, {total_scenes} scenes; {with_text} get a wiki text ({with_text / max(total_scenes, 1):.0%}); {len(todo)} to embed, {len(stale)} to remove from the index")
         if not args.apply:
             print("Preview only - nothing was changed. Run again with --apply.")
             return

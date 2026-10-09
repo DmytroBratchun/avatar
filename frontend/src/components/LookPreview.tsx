@@ -7,12 +7,14 @@ const FORMATS: { key: LookFormat; label: string }[] = [
   { key: "4:3", label: "4:3" },
   { key: "16:9", label: "16:9" },
   { key: "wide", label: "Wider" },
+  { key: "comic", label: "Comic" },
 ];
 
 const SOURCE_NOTES = {
   project: "A clip from this video.",
   library: "This video has no clip of this format yet - showing footage of this format from the library.",
   placeholder: "No footage of this format in the library - showing a placeholder of the same shape.",
+  none: "There are no comic pages in the library to show.",
 };
 
 export default function LookPreview({
@@ -25,7 +27,7 @@ export default function LookPreview({
   onFormat: (format: LookFormat) => void;
 }) {
   // one position per format, so switching back returns to the clip you were on
-  const [indexes, setIndexes] = useState<Record<LookFormat, number>>({ "4:3": 0, "16:9": 0, wide: 0 });
+  const [indexes, setIndexes] = useState<Record<LookFormat, number>>({ "4:3": 0, "16:9": 0, wide: 0, comic: 0 });
   const [loadedUrl, setLoadedUrl] = useState<string | null>(null);
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
 
@@ -38,7 +40,7 @@ export default function LookPreview({
 
   const current = info?.[format];
   const count = current?.count ?? 1;
-  const index = indexes[format] % count;
+  const index = count > 0 ? indexes[format] % count : 0;
   // everything the still depends on - a new value makes the browser fetch a new still
   const version = JSON.stringify([project.settings, selections, project.rendered_at]);
   const url = api.editorPreviewUrl(project.id, index, format, version);
@@ -67,7 +69,9 @@ export default function LookPreview({
           </button>
         </div>
       </div>
-      {failedUrl === url ? (
+      {count === 0 ? (
+        <p className="hint">Nothing to preview.</p>
+      ) : failedUrl === url ? (
         <p className="error-text">Could not build the preview - see the Backend log.</p>
       ) : (
         <img

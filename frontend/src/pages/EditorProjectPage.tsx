@@ -208,6 +208,7 @@ function BeatRow({
   projectId,
   beat,
   projectShows,
+  projectComics,
   playing,
   onPlay,
   disabled,
@@ -215,6 +216,7 @@ function BeatRow({
 }: {
   projectId: string;
   projectShows: string[];
+  projectComics: string[];
   beat: EditorBeat;
   playing: boolean;
   onPlay: () => void;
@@ -238,12 +240,13 @@ function BeatRow({
             {(beat.end - beat.start).toFixed(1)}s
           </div>
         </td>
-        <td style={{ verticalAlign: "top" }}>
+        {/* a share of the table of its own, or a beat with many clips squeezes it into a sliver */}
+        <td style={{ verticalAlign: "top", width: "45%", minWidth: "16rem" }}>
           {beat.summary && <div style={{ fontWeight: 600, fontSize: "0.85rem" }}>{beat.summary}</div>}
           <div style={{ color: "var(--text-secondary)" }}>{beat.text}</div>
         </td>
         <td style={{ verticalAlign: "top" }}>
-          <div style={{ display: "flex", gap: "0.3rem" }}>
+          <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
             {beat.slots.map((s, i) => (
               <SlotThumb key={i} projectId={projectId} slot={s} active={openSlot === i} onClick={() => setOpenSlot(openSlot === i ? null : i)} />
             ))}
@@ -274,6 +277,7 @@ function BeatRow({
               slotIndex={openSlot}
               slot={slot}
               projectShows={projectShows}
+              projectComics={projectComics}
               disabled={disabled}
               onChange={onChange}
             />
@@ -317,6 +321,8 @@ export default function EditorProjectPage() {
   });
   // a stage that keeps locked clips, waiting for the answer to "keep them?"
   const [askUnlock, setAskUnlock] = useState<EditorStage | null>(null);
+  const [creditsCopied, setCreditsCopied] = useState(false);
+  const [pathCopied, setPathCopied] = useState(false);
   const settingsMutation = useMutation({
     mutationFn: (payload: Parameters<typeof api.updateEditorProject>[1]) => api.updateEditorProject(id, payload),
     onSuccess: setProject,
@@ -375,6 +381,8 @@ export default function EditorProjectPage() {
       ),
     ),
   );
+  // what goes into the video's description, heading included
+  const creditsText = photoCredits.length ? ["Credits", "", ...photoCredits].join("\n") : "";
   const lockedCount = project.beats.reduce((n, beat) => n + beat.slots.filter((slot) => slot.locked).length, 0);
   const mutationError = (runMutation.error ?? uploadMutation.error) as Error | null;
 
@@ -701,6 +709,7 @@ export default function EditorProjectPage() {
                     projectId={project.id}
                     beat={beat}
                     projectShows={availableShows}
+                    projectComics={projectUniverse?.comics ?? []}
                     playing={playingBeat?.id === beat.id}
                     onPlay={() => togglePlay(beat)}
                     disabled={busy}
@@ -744,6 +753,22 @@ export default function EditorProjectPage() {
                 Rendered {project.rendered_at ? new Date(project.rendered_at).toLocaleString() : ""}. Changes to clips,
                 quotes or the look appear after rendering again.
               </p>
+              <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
+                <button className="small" onClick={() => void api.revealEditorOutput(project.id)}>
+                  Show in folder
+                </button>
+                <button
+                  className="small"
+                  onClick={async () => {
+                    const { path } = await api.getEditorOutputPath(project.id);
+                    await navigator.clipboard.writeText(path);
+                    setPathCopied(true);
+                    setTimeout(() => setPathCopied(false), 1500);
+                  }}
+                >
+                  {pathCopied ? "Copied ✓" : "Copy path"}
+                </button>
+              </div>
             </>
           ) : (
             <p className="hint">Not rendered yet.</p>
@@ -751,12 +776,24 @@ export default function EditorProjectPage() {
           {renderButton}
           {photoCredits.length > 0 && (
             <div style={{ marginTop: "1rem" }}>
-              <h3>Photo credits</h3>
-              <p className="hint" style={{ marginTop: 0 }}>
-                The photos in this video are from Wikimedia Commons under licences that ask to name their authors - paste this
+              <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                <h3 style={{ margin: 0 }}>Photo credits</h3>
+                <button
+                  className="small"
+                  onClick={() => {
+                    void navigator.clipboard.writeText(creditsText);
+                    setCreditsCopied(true);
+                    setTimeout(() => setCreditsCopied(false), 1500);
+                  }}
+                >
+                  {creditsCopied ? "Copied ✓" : "Copy"}
+                </button>
+              </div>
+              <p className="hint" style={{ marginTop: "0.4rem" }}>
+                The photos in this video are from Wikimedia Commons under licences that ask to name their authors - copy this
                 into the video's description.
               </p>
-              <textarea readOnly value={photoCredits.join("\n")} rows={Math.min(10, photoCredits.length + 1)} style={{ width: "100%" }} />
+              <textarea readOnly value={creditsText} rows={Math.min(12, photoCredits.length + 3)} style={{ width: "100%" }} />
             </div>
           )}
         </div>

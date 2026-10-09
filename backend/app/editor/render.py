@@ -22,11 +22,22 @@ from app.editor import bgtrack, store
 from app.editor.store import Candidate, Project, Quote, RenderSettings
 
 WIDTH, HEIGHT = 1920, 1080
+# The timeline - slot lengths, cuts against the audio, the background track - is
+# counted in frames of FPS. A video rendered at 48 fps (RenderSettings.frame_rate)
+# keeps that plan and only encodes every frame as two: twice the frames at twice the
+# rate last exactly as long, so nothing drifts. Footage (all of it 23.976) shows each
+# of its frames twice; only what the renderer moves itself - a scrolling comic page,
+# a panning photo - gets the in-between positions.
 FPS_NUM, FPS_DEN = 24000, 1001
 FPS = FPS_NUM / FPS_DEN
 WIDE_ASPECT = 1.6  # picture aspect ratio from which a source counts as widescreen
 ENCODE_VERSION = 3  # bump to invalidate every cached segment after changing the filter graph
 PARALLEL_ENCODES = 3
+
+# A still picture as a layer: read, scaled and converted once, then that one frame is
+# repeated. (An input opened with -loop 1 is decoded again for every output frame, and
+# every filter after it runs again on the same picture - most of a clip's time.)
+STILL = "loop=loop=-1:size=1:start=0"
 
 FRAMES_DIR_NAME = "_frames"
 BORDER_FRAME = "border"
@@ -34,6 +45,15 @@ NO_FRAME = "none"
 
 CROP_CACHE_PATH = DATA_DIR / "editor_crop_cache.json"
 _crop_lock = threading.Lock()
+
+
+def _rate_factor(settings: RenderSettings) -> int:
+    """How many output frames each frame of the FPS clock is encoded as."""
+    return 2 if settings.frame_rate == 48 else 1
+
+
+def _rate(factor: int) -> str:
+    return f"{FPS_NUM * factor}/{FPS_DEN}"
 
 
 def _run(args: list[str]) -> subprocess.CompletedProcess:
@@ -261,12 +281,12 @@ def _frame_count(start: float, end: float) -> int:
 
 def _comic_args(
     candidate: Candidate, frames: int, settings: RenderSettings, encode: list[str],
-    track: Path | None, track_frame: int, track_identity: list | None,
+    track: Path | None, track_frame: int, track_identity: list | None, upward: bool = False, factor: int = 1,
 ) -> tuple[list[str], dict]:
     """A page of a comic in place of a clip: the page as a column in the middle of
-    the screen, scrolling from its top to its bottom over the clip's length, with no
-    frame around it. Behind it, blurred and dimmed, is the background scenery when
-    the project has it, otherwise the page itself."""
+    the screen, scrolling from its top to its bottom over the clip's length (from its
+    bottom to its top when `upward`), with no frame around it. Behind it, blurred and
+    dimmed, is the background scenery when the project has it, otherwise the page itself."""
     with Image.open(candidate.image_path) as image:
         page_w, page_h = image.size
     width = _even(WIDTH * min(1.0, max(0.2, settings.comic_width)))
@@ -275,35 +295,43 @@ def _comic_args(
     seconds = frames / FPS
     # eased: the page starts and stops gently rather than at full speed
     progress = f"min(1,t/{seconds:.4f})"
+    if upward:
+        progress = f"(1-{progress})"
     y = f"-{travel}*({progress}*{progress}*(3-2*{progress}))" if travel else f"{(HEIGHT - height) // 2}"
     keep = 1.0 - settings.dim
     sigma = max(0.1, settings.blur / 4)
-    inputs = ["-loop", "1", "-framerate", f"{FPS_NUM}/{FPS_DEN}", "-i", candidate.image_path]
-    page = f"scale={width}:{height}:flags=lanczos,setsar=1"
+    inputs = ["-framerate", _rate(factor), "-i", candidate.image_path]
+    page = f"scale={width}:{height}:flags=lanczos,format=yuv420p,setsar=1,{STILL}"
     identity = {
         "comic": candidate.image_path, "frames": frames, "width": width, "blur": settings.blur,
-        "dim": settings.dim, "v": ENCODE_VERSION,
+        "dim": settings.dim, "v": ENCODE_VERSION, "upward": upward,
     }
     if track is None:
         graph = (
             f"[0:v]split[a][b];[a]scale={WIDTH // 4}:{HEIGHT // 4}:force_original_aspect_ratio=increase,"
-            f"crop={WIDTH // 4}:{HEIGHT // 4},gblur=sigma={max(sigma, 6):.2f},scale={WIDTH}:{HEIGHT},setsar=1,"
-            f"colorchannelmixer=rr={keep * 0.6:.3f}:gg={keep * 0.6:.3f}:bb={keep * 0.6:.3f}[bg];[b]{page}[fg]"
+            f"crop={WIDTH // 4}:{HEIGHT // 4},gblur=sigma={max(sigma, 6):.2f},"
+            f"colorchannelmixer=rr={keep * 0.6:.3f}:gg={keep * 0.6:.3f}:bb={keep * 0.6:.3f},"
+            f"scale={WIDTH}:{HEIGHT},format=yuv420p,setsar=1,{STILL}[bg];[b]{page}[fg]"
         )
     else:
         seek_to = max(0.0, (track_frame - 0.4) / FPS)
         inputs += ["-ss", f"{seek_to:.5f}", "-i", str(track)]
+        # the track is small and at the footage's rate: blur and dim it as it is, and
+        # only then enlarge it and repeat its frames up to the output rate
         graph = (
             f"[0:v]{page}[fg];"
-            f"[1:v]fps={FPS_NUM}/{FPS_DEN},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop=-1,gblur=sigma={sigma:.2f},"
-            f"scale={WIDTH}:{HEIGHT},setsar=1,colorchannelmixer=rr={keep:.3f}:gg={keep:.3f}:bb={keep:.3f}[bg]"
+            f"[1:v]setpts=PTS-STARTPTS,gblur=sigma={sigma:.2f},"
+            f"colorchannelmixer=rr={keep:.3f}:gg={keep:.3f}:bb={keep:.3f},scale={WIDTH}:{HEIGHT},setsar=1,"
+            f"fps={_rate(factor)},tpad=stop_mode=clone:stop=-1[bg]"
         )
         identity["background"] = track_identity
     graph += f";[bg][fg]overlay=x={(WIDTH - width) // 2}:y='{y}'[out]"
     return [*inputs, "-filter_complex", graph, "-map", "[out]", *encode], identity
 
 
-def _photo_args(candidate: Candidate, frames: int, settings: RenderSettings, encode: list[str]) -> tuple[list[str], dict]:
+def _photo_args(
+    candidate: Candidate, frames: int, settings: RenderSettings, encode: list[str], factor: int = 1,
+) -> tuple[list[str], dict]:
     """A photo in place of a clip, with no frame around it. A wide photo fills the
     screen and pans slowly across; any other is shown whole in the middle, over a
     blurred and darkened copy of itself."""
@@ -312,7 +340,7 @@ def _photo_args(candidate: Candidate, frames: int, settings: RenderSettings, enc
     seconds = frames / FPS
     progress = f"min(1,t/{seconds:.4f})"
     eased = f"({progress}*{progress}*(3-2*{progress}))"
-    inputs = ["-loop", "1", "-framerate", f"{FPS_NUM}/{FPS_DEN}", "-i", candidate.image_path]
+    inputs = ["-framerate", _rate(factor), "-i", candidate.image_path]
     identity = {"photo": candidate.image_path, "frames": frames, "v": ENCODE_VERSION}
     if photo_w / photo_h >= 1.5:
         # cover the screen with a little to spare, and pan across that spare width
@@ -320,8 +348,8 @@ def _photo_args(candidate: Candidate, frames: int, settings: RenderSettings, enc
         width, height = _even(photo_w * scale), _even(photo_h * scale)
         travel = width - WIDTH
         graph = (
-            f"color=black:s={WIDTH}x{HEIGHT}:r={FPS_NUM}/{FPS_DEN}[bg];"
-            f"[0:v]scale={width}:{height}:flags=lanczos,setsar=1[fg];"
+            f"color=black:s={WIDTH}x{HEIGHT}:r={_rate(factor)}[bg];"
+            f"[0:v]scale={width}:{height}:flags=lanczos,format=yuv420p,setsar=1,{STILL}[fg];"
             f"[bg][fg]overlay=x='-{travel}*{eased}':y={(HEIGHT - height) // 2}:shortest=1[out]"
         )
         identity["pan"] = True
@@ -332,9 +360,10 @@ def _photo_args(candidate: Candidate, frames: int, settings: RenderSettings, enc
         sigma = max(6.0, settings.blur / 4)
         graph = (
             f"[0:v]split[a][b];[a]scale={WIDTH // 4}:{HEIGHT // 4}:force_original_aspect_ratio=increase,"
-            f"crop={WIDTH // 4}:{HEIGHT // 4},gblur=sigma={sigma:.2f},scale={WIDTH}:{HEIGHT},setsar=1,"
-            f"colorchannelmixer=rr={keep * 0.6:.3f}:gg={keep * 0.6:.3f}:bb={keep * 0.6:.3f}[bg];"
-            f"[b]scale={width}:{height}:flags=lanczos,setsar=1[fg];"
+            f"crop={WIDTH // 4}:{HEIGHT // 4},gblur=sigma={sigma:.2f},"
+            f"colorchannelmixer=rr={keep * 0.6:.3f}:gg={keep * 0.6:.3f}:bb={keep * 0.6:.3f},"
+            f"scale={WIDTH}:{HEIGHT},format=yuv420p,setsar=1,{STILL}[bg];"
+            f"[b]scale={width}:{height}:flags=lanczos,format=yuv420p,setsar=1,{STILL}[fg];"
             f"[bg][fg]overlay=x={(WIDTH - width) // 2}:y={(HEIGHT - height) // 2}[out]"
         )
         identity.update(blur=settings.blur, dim=settings.dim)
@@ -351,21 +380,54 @@ def _segment_args(
     track_frame: int = 0,
     track_identity: list | None = None,
     mask: Path | None = None,
+    upward: bool = False,
 ) -> tuple[list[str], dict]:
-    """ffmpeg arguments (without the output path) and the cache identity for one slot."""
+    """ffmpeg arguments (without the output path) and the cache identity for one slot.
+    `frames` and `track_frame` are on the FPS clock whatever the output rate.
+    `upward` scrolls a comic page from its bottom to its top."""
+    factor = _rate_factor(settings)
+    args, identity = _rate_segment_args(
+        candidate, frames, settings, overlay, window, track, track_frame, track_identity, mask, upward, factor
+    )
+    if factor > 1:
+        identity["fps"] = settings.frame_rate
+        if "-filter_complex" in args and "comic" not in identity and "photo" not in identity:
+            # Footage is composed on the FPS clock and only then repeated: its frames sit
+            # exactly on every other output frame, so each shows twice, in clean pairs.
+            # (Raising the rate before a held start or end shifts the pairs by one.)
+            at = args.index("-filter_complex") + 1
+            args = [*args]
+            args[at] += f";[out]fps={_rate(factor)}[outr]"
+            args[args.index("[out]")] = "[outr]"
+    return args, identity
+
+
+def _rate_segment_args(
+    candidate: Candidate | None,
+    frames: int,
+    settings: RenderSettings,
+    overlay: Path | None,
+    window: tuple[int, int, int, int],
+    track: Path | None,
+    track_frame: int,
+    track_identity: list | None,
+    mask: Path | None,
+    upward: bool,
+    factor: int,
+) -> tuple[list[str], dict]:
     encode = [
-        "-frames:v", str(frames), "-an",
+        "-frames:v", str(frames * factor), "-an",
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p",
-        "-r", f"{FPS_NUM}/{FPS_DEN}", "-video_track_timescale", str(FPS_NUM),
+        "-r", _rate(factor), "-video_track_timescale", str(FPS_NUM * factor),
     ]
     if candidate is None:
-        args = ["-f", "lavfi", "-i", f"color=black:s={WIDTH}x{HEIGHT}:r={FPS_NUM}/{FPS_DEN}", *encode]
+        args = ["-f", "lavfi", "-i", f"color=black:s={WIDTH}x{HEIGHT}:r={_rate(factor)}", *encode]
         return args, {"blank": True, "frames": frames, "v": ENCODE_VERSION}
 
     if candidate.kind == "comic" and candidate.image_path:
-        return _comic_args(candidate, frames, settings, encode, track, track_frame, track_identity)
+        return _comic_args(candidate, frames, settings, encode, track, track_frame, track_identity, upward, factor)
     if candidate.kind == "photo" and candidate.image_path:
-        return _photo_args(candidate, frames, settings, encode)
+        return _photo_args(candidate, frames, settings, encode, factor)
 
     cw, ch, cx, cy = source_crop(candidate.file_path)
     # Timestamps are reset to zero on every stream: after a seek the first frame of an
@@ -427,8 +489,9 @@ def _segment_args(
     sigma = max(0.1, settings.blur / 4)
     blur_chain = (
         f"scale={WIDTH // 4}:{HEIGHT // 4}:force_original_aspect_ratio=increase,crop={WIDTH // 4}:{HEIGHT // 4},"
-        f"gblur=sigma={sigma:.2f},scale={WIDTH}:{HEIGHT},"
-        f"colorchannelmixer=rr={keep:.3f}:gg={keep:.3f}:bb={keep:.3f}[bg]"
+        # dimmed while still small: at full size it is the costliest step of the background
+        f"gblur=sigma={sigma:.2f},colorchannelmixer=rr={keep:.3f}:gg={keep:.3f}:bb={keep:.3f},"
+        f"scale={WIDTH}:{HEIGHT}[bg]"
     )
     fg_chain = f"scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h}[fg]"
     inputs = [*seek]
@@ -445,21 +508,24 @@ def _segment_args(
         graph = (
             f"[0:v]{base},{fg_chain};"
             f"[1:v]fps={FPS_NUM}/{FPS_DEN},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop=-1,gblur=sigma={sigma:.2f},"
-            f"scale={WIDTH}:{HEIGHT},colorchannelmixer=rr={keep:.3f}:gg={keep:.3f}:bb={keep:.3f}[bg]"
+            f"colorchannelmixer=rr={keep:.3f}:gg={keep:.3f}:bb={keep:.3f},scale={WIDTH}:{HEIGHT}[bg]"
         )
         identity["background"] = track_identity
 
     next_input = 1 if track is None else 2
     if mask is not None:
         # round the clip's corners so they don't poke out from under the frame artwork
-        inputs += ["-loop", "1", "-i", str(mask)]
-        graph += f";[fg]format=rgba[fgc];[{next_input}:v]format=gray[m];[fgc][m]alphamerge[fgr];[bg][fgr]overlay={x}:{y}[c]"
+        inputs += ["-i", str(mask)]
+        graph += (
+            f";[fg]format=yuva420p[fgc];[{next_input}:v]format=gray,{STILL}[m];"
+            f"[fgc][m]alphamerge[fgr];[bg][fgr]overlay={x}:{y}[c]"
+        )
         next_input += 1
     else:
         graph += f";[bg][fg]overlay={x}:{y}[c]"
     if overlay is not None:
-        inputs += ["-loop", "1", "-i", str(overlay)]
-        graph += f";[c][{next_input}:v]overlay=0:0[out]"
+        inputs += ["-i", str(overlay)]
+        graph += f";[{next_input}:v]format=yuva420p,{STILL}[frame];[c][frame]overlay=0:0[out]"
     else:
         graph += ";[c]null[out]"
     identity.update(
@@ -472,6 +538,7 @@ def _segment_args(
 
 
 FORMATS = ("4:3", "16:9", "wide")
+COMIC = "comic"  # the preview's look of a comic page, next to the three footage formats
 # picture size of a stand-in clip for each format, when no real footage of it exists
 PLACEHOLDER_SIZES = {"4:3": (1440, 1080), "16:9": (1920, 1080), "wide": (1920, 804)}
 
@@ -521,6 +588,8 @@ def preview_clips(project: Project, fmt: str | None) -> tuple[str, list[tuple[Ca
     ]
     if fmt is None:
         return "project", own
+    if fmt == COMIC:
+        return _comic_preview_clips(own)
     own = [item for item in own if item[0].kind == "video"]  # a comic page or a photo has no footage format
     matching = [item for item in own if footage_format(item[0].file_path) == fmt]
     if matching:
@@ -558,6 +627,34 @@ def preview_clips(project: Project, fmt: str | None) -> tuple[str, list[tuple[Ca
     return "placeholder", [(clip, 4.0, None)]
 
 
+def _comic_preview_clips(own: list[tuple[Candidate, float, float | None]]) -> tuple[str, list[tuple[Candidate, float, float | None]]]:
+    """The project's comic pages, or else a few pages of the first comic in the
+    library, or nothing when there is no comic with rendered pages."""
+    from sqlalchemy import select as sa_select
+
+    from app.db.models import Scene, Source
+    from app.db.session import SessionLocal
+    from app.editor.comic_pages import page_candidate
+
+    pages = [item for item in own if item[0].kind == "comic" and item[0].image_path]
+    if pages:
+        return "project", pages
+    db = SessionLocal()
+    try:
+        for source in db.execute(sa_select(Source).where(Source.kind == "comic").order_by(Source.id)).scalars():
+            scenes = [
+                scene for scene in db.execute(
+                    sa_select(Scene).where(Scene.source_id == source.id).order_by(Scene.start_time)
+                ).scalars()
+                if scene.keyframe_paths and Path(scene.keyframe_paths[0]).exists()
+            ]
+            if scenes:
+                return "library", [(page_candidate(scene, source, 5.0, 0.0), 5.0, None) for scene in scenes[:10]]
+    finally:
+        db.close()
+    return "none", []
+
+
 def render_preview(project: Project, slot_index: int, fmt: str | None = None) -> Path:
     """One still of the finished look - clip, background, frame, rounding - for a
     single clip, using the project's current settings. Takes a second or two, so the
@@ -585,8 +682,10 @@ def render_preview(project: Project, slot_index: int, fmt: str | None = None) ->
     # over a different stretch of the background each time
     track_time = at + middle if at is not None else 20.0 + 11.0 * (slot_index % 12)
 
+    # a comic page scrolls over the slot's whole length; the still is its first frame
+    frames = max(1, round(duration * FPS)) if candidate.kind == "comic" else 1
     args, _ = _segment_args(
-        candidate, 1, project.settings, overlay, window,
+        candidate, frames, project.settings, overlay, window,
         track=track, track_frame=round(track_time * FPS), track_identity=[], mask=mask,
     )
     cache_dir.mkdir(exist_ok=True)
@@ -815,12 +914,15 @@ def render_project(project_id: str, report) -> None:
     # (narration time where the narration is interrupted, quote clip, its length in frames)
     interruptions: list[tuple[float, Candidate, int]] = []
     position = 0
+    comic_run = 0  # comic pages in a row so far: they scroll down and up in turn
     for candidate, frames, quote, index in items:
+        is_comic = candidate is not None and candidate.kind == "comic"
         args, identity = _segment_args(
             candidate, frames, project.settings, overlay, window,
             track=track, track_frame=position, track_identity=bgtrack.slice_identity(placed, position, frames, speed),
-            mask=mask,
+            mask=mask, upward=is_comic and comic_run % 2 == 1,
         )
+        comic_run = comic_run + 1 if is_comic else 0
         name = hashlib.sha1(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
         path = segments_dir / f"{name}.mp4"
         ordered.append(path)

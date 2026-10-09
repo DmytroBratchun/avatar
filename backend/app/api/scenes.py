@@ -52,13 +52,20 @@ def list_scenes(
     moods: list[str] | None = Query(default=None),
     shows: list[str] | None = Query(default=None),
     caption_status: str | None = None,
+    kind: str | None = None,
+    page: int | None = None,
     limit: int = 50,
     offset: int = 0,
     db: Session = Depends(get_db),
 ) -> list[Scene]:
+    """kind: "video" (episodes) or "comic"; page: a comic page, counted from 1."""
     stmt = apply_tag_filters(select(Scene), book, episode_number, characters, locations, moods, shows)
     if source_id is not None:
         stmt = stmt.where(Scene.source_id == source_id)
+    if kind is not None:
+        stmt = stmt.where(Scene.source_id.in_(select(Source.id).where(Source.kind == kind)))
+    if page is not None:
+        stmt = stmt.where(Scene.start_time == float(page - 1))
     if caption_status is not None:
         stmt = stmt.where(Scene.caption_status == caption_status)
     stmt = stmt.order_by(Scene.source_id, Scene.start_time).offset(offset).limit(limit)
@@ -77,8 +84,12 @@ def get_facets(db: Session = Depends(get_db)) -> FacetsOut:
         text("SELECT DISTINCT show_title FROM scenes WHERE show_title IS NOT NULL ORDER BY show_title")
     ).all()
 
+    comics = db.execute(
+        select(Source.show_title).where(Source.kind == "comic", Source.show_title.isnot(None)).distinct().order_by(Source.show_title)
+    ).scalars()
     return FacetsOut(
         shows=[row[0] for row in shows],
+        comics=list(comics),
         characters=distinct_values("character_tags"),
         locations=distinct_values("location_tags"),
         moods=distinct_values("mood_action_tags"),

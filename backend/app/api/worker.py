@@ -130,3 +130,47 @@ def stop_worker() -> dict:
     WORKER_PID_FILE.unlink(missing_ok=True)
     _mark_stopped()
     return {"stopped": True, "was_running": bool(pids)}
+
+
+# --- Claude subscription limits -----------------------------------------------
+
+# Captioning and every editor LLM call run through the Claude Code CLI and spend the
+# Claude subscription, which has a 5-hour and a weekly limit. This asks Anthropic the
+# way Claude Code's own /usage does, with the token the CLI keeps after `claude login`;
+# the endpoint is not a documented API, so anything unexpected is reported as unknown.
+CLAUDE_CREDENTIALS = Path.home() / ".claude" / ".credentials.json"
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+USAGE_CACHE_SECONDS = 60
+_usage_cache: tuple[float, dict] | None = None
+
+
+@router.get("/claude-usage")
+def claude_usage() -> dict:
+    """{"available", "session": {"percent", "resets_at"}, "week": {...}} - how much
+    of the subscription's 5-hour and weekly limits is used."""
+    import time
+    import urllib.error
+    import urllib.request
+
+    global _usage_cache
+    if _usage_cache and time.monotonic() - _usage_cache[0] < USAGE_CACHE_SECONDS:
+        return _usage_cache[1]
+    result: dict = {"available": False}
+    try:
+        token = json.loads(CLAUDE_CREDENTIALS.read_text(encoding="utf-8"))["claudeAiOauth"]["accessToken"]
+        request = urllib.request.Request(
+            CLAUDE_USAGE_URL, headers={"Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"}
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            data = json.load(response)
+
+        def window(key: str) -> dict | None:
+            value = data.get(key)
+            return {"percent": value.get("utilization"), "resets_at": value.get("resets_at")} if value else None
+
+        result = {"available": True, "session": window("five_hour"), "week": window("seven_day")}
+    except (OSError, KeyError, ValueError, urllib.error.URLError) as exc:
+        # an expired token is refreshed by the CLI the next time it runs
+        result = {"available": False, "reason": str(exc)[:200]}
+    _usage_cache = (time.monotonic(), result)
+    return result

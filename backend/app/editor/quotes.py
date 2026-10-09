@@ -10,7 +10,13 @@ the episodes, see services/quote_bank.py) and the list of episodes, and for each
 place a quote would help either picks one from the bank or says what line it would
 want and in which episodes it expects to find it -> for the latter, Claude reads the
 full transcripts of those episodes and picks exact lines, or nothing -> the fragment is re-transcribed with word timestamps to find where the
-words really start and stop, because the index only has line-level timings.
+words really start and stop, because the index only has line-level timings -> Claude
+then hears every cut clip in its place, between the narration before and after it,
+and keeps it, moves it to a sentence nearby or drops it (_review): a line can be the
+right one and still sit badly where it was put.
+
+How many quotes a video gets is the model's call - there is no limit, and none is
+a fine answer.
 
 There is no vector search here on purpose. A whole episode's transcript is only a
 few thousand tokens, so reading it outright beats retrieving one-minute windows of
@@ -18,8 +24,10 @@ it: the model sees who is talking to whom, and finds lines that match in meaning
 rather than in wording.
 """
 
+import bisect
 import copy
 import difflib
+import logging
 import re
 import subprocess
 import uuid
@@ -32,8 +40,11 @@ from app.db.models import BankQuote, Source, TranscriptLine
 from app.editor.llm import run_claude_json
 from app.editor.store import Project, Quote, QuotePart, Word, project_shows, project_universe
 
-MAX_QUOTES = 8
+logger = logging.getLogger(__name__)
+
 EPISODES_PER_QUOTE = 3
+# the review shows this many sentences of narration either side of a clip, and may move it within them
+REVIEW_BEFORE, REVIEW_AFTER = 3, 3
 # Quotes depend on the model remembering which line is spoken where. Tried with Sonnet,
 # recall turned up lines that are not in the show at all; Opus found 6 of 7.
 QUOTE_MODEL = "opus"
@@ -119,6 +130,32 @@ PICK_SCHEMA = {
         }
     },
     "required": ["quotes"],
+}
+
+REVIEW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "clips": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "clip": {"type": "integer", "description": "The clip number as given."},
+                    "verdict": {"type": "string", "enum": ["keep", "move", "drop"]},
+                    "after_sentence": {
+                        "type": "integer",
+                        "description": "With move: the number of the sentence the clip should play after - one of those shown for it.",
+                    },
+                    "why": {
+                        "type": "string",
+                        "description": "One sentence: what the clip adds where it now sits, or why it goes.",
+                    },
+                },
+                "required": ["clip", "verdict", "why"],
+            },
+        }
+    },
+    "required": ["clips"],
 }
 
 # Quote cuts (the project's quote_cuts setting): a quote may be put together from up
@@ -252,17 +289,33 @@ def _wanted(
         "wants to drop in a few short clips from the show where a character's own words make the point "
         "better than the narrator can - proof, a punchline, or an emotional beat. A clip is short: "
         f"{QUOTE_LENGTH}, never a whole speech or exchange.\n\n"
-        f"Suggest up to {MAX_QUOTES} such moments, fewer if the narration doesn't call for them (none is a "
-        "fine answer). For each, give the sentence it should play after, the line you have in mind, and the "
+        "How many is yours to judge: suggest every place where a clip really earns its seat, and no others - "
+        "a video may have many or none. A clip interrupts the narrator, so each has to be worth the "
+        "interruption. Narration that retells something the shows never put on screen - a comic, a book, how "
+        "the shows were made - seldom has a line from the shows that belongs in it: there a clip fits only "
+        "where the narrator turns to a scene of the shows themselves.\n\n"
+        "Judge each clip in its place - read the sentence it would follow and the one that would come after "
+        "it:\n"
+        "- It is about the very point being made there, not merely the same subject or character.\n"
+        "- It does not come between two sentences that lean on each other. When the next sentence picks up "
+        "the words or the thought of the one before ('...and so she left the city.' / 'Leaving, though, was "
+        "the easy part.'), nothing goes between them: put the clip after the thought is finished, or leave "
+        "it out.\n"
+        "- It does not say again what the narrator has just said or is about to say, and does not pull "
+        "against the point of the sentence before it.\n"
+        "- The words to play are a complete sentence that makes sense heard on its own, by someone who does "
+        "not remember the scene - not a clause that needs the rest of its speech ('My brother, who never "
+        "once...').\n\n"
+        "For each, give the sentence it should play after, the line you have in mind, and the "
         "episodes to look for it in. Only suggest lines that are really spoken in the show; the transcripts "
-        "of the episodes you name will be read to find them, so be specific about the wording and the scene. "
-        "Don't pick lines that just repeat what the narrator said.\n\n"
+        "of the episodes you name will be read to find them, so be specific about the wording and the scene.\n\n"
         + (
             "A quote bank is given below: well-known quotes that have already been found in the episodes. "
             "When the line you want is there, give its number as bank_quote and the words to play as "
-            "bank_part - it is cut with no search, so prefer the bank when it has a line that fits as well as "
-            "anything you can recall. Most banked quotes are longer than a clip should be: copy only the "
-            "sentence or two that make the point. "
+            "bank_part - it is then cut with no search. The bank only saves that search: decide what line the "
+            "place needs first, and never settle for a banked line because it is at hand - a line that is not "
+            "in the bank is looked for just the same. Most banked quotes are longer than a clip should be: "
+            "copy only the sentence or two that make the point, as whole sentences. "
             + (CUTS_HINT.format(field="bank_part, then bank_then") + " " if cuts else "")
             + "When nothing in the bank fits, describe the line and name the episodes as usual.\n\n"
             if bank
@@ -284,7 +337,7 @@ def _wanted(
     result, cost = run_claude_json(prompt, schema, cwd=cwd, timeout=600, model=QUOTE_MODEL)
     known = {source.id for source in episodes}
     wanted = []
-    for quote in result["quotes"][:MAX_QUOTES]:
+    for quote in result["quotes"]:
         if not 0 <= int(quote["after_sentence"]) < len(ends):
             continue
         quote["episodes"] = [int(e) for e in quote.get("episodes", []) if int(e) in known][:EPISODES_PER_QUOTE]
@@ -368,6 +421,68 @@ def _read_episodes(
         cost += batch_cost or 0.0
         picks.extend(result["quotes"])
     return picks, offered, cost
+
+
+def _review(project: Project, words: list[Word], ends: list[int], universe, cwd: Path) -> float:
+    """Has Claude hear every proposed clip where it would play and keep it, move it
+    to a sentence boundary nearby, or drop it. The clips were chosen from memory of
+    the line and cut afterwards; this is the first time one is read as cut, between
+    the sentences around it. Approved quotes are the user's and are left alone."""
+    proposed = [quote for quote in project.quotes if quote.status != "approved"]
+    if not proposed:
+        return 0.0
+    starts = [0] + [e + 1 for e in ends[:-1]]
+    sentences = [" ".join(w.text for w in words[s : e + 1]) for s, e in zip(starts, ends)]
+    blocks, windows = [], []
+    for n, quote in enumerate(proposed):
+        # the sentence the clip plays after (a clip snapped to a beat may sit inside one)
+        at = min(bisect.bisect_left(ends, quote.after_word), len(ends) - 1)
+        low, high = max(0, at - REVIEW_BEFORE + 1), min(len(ends) - 1, at + REVIEW_AFTER)
+        windows.append((low, high))
+        where = f"{quote.show_title}, {universe.season_word} {quote.book}, Episode {quote.episode_number}"
+        lines = []
+        for i in range(low, high + 1):
+            lines.append(f"[{i}] {sentences[i]}")
+            if i == at:
+                lines.append(f"    >>> CLIP {n} ({quote.speaker or 'unknown'}, {where}): \"{quote.text}\"")
+        blocks.append("\n".join(lines))
+    prompt = (
+        f"Short clips of dialogue from {', '.join(project_shows(project)) or universe.name} have been cut to be "
+        "dropped into the narration of a video essay: the narrator stops, the clip plays with the show's own "
+        "sound, the narrator goes on. Below, each clip is shown where it would play, with the numbered "
+        "sentences of narration before and after it; the words in quotes are exactly what is heard.\n\n"
+        "Hear each one in its place, as a viewer would, and decide:\n"
+        "- keep: the clip is about the very point the narrator is making there, the words are a complete "
+        "thought that makes sense heard on their own, and the narration reads naturally through it.\n"
+        "- move: the clip belongs here but at a different sentence boundary - most often because where it "
+        "sits it comes between two sentences that lean on each other (the next one picks up the words or the "
+        "thought of the one before), or before the sentence it answers. Give the sentence it should play "
+        "after instead, from those shown.\n"
+        "- drop: it shares only the subject with the narration, repeats what the narrator says right there, "
+        "pulls against the point being made, is a fragment that needs the rest of its speech, or makes the "
+        "same point as another clip (keep the better of the two).\n\n"
+        "Be strict: a clip interrupts the narrator, and one that does not fit is worse than none. Any number "
+        "may stay, including all or none. Answer for every clip.\n\n"
+        + "\n\n".join(blocks)
+    )
+    result, cost = run_claude_json(prompt, REVIEW_SCHEMA, cwd=cwd, timeout=600, model=QUOTE_MODEL)
+    dropped: set[str] = set()
+    for answer in result.get("clips", []):
+        n = int(answer.get("clip", -1))
+        if not 0 <= n < len(proposed):
+            continue
+        quote, why = proposed[n], (answer.get("why") or "").strip()
+        if answer["verdict"] == "drop":
+            logger.info("quote dropped in review: %r - %s", quote.text, why)
+            dropped.add(quote.id)
+            continue
+        target = answer.get("after_sentence")
+        if answer["verdict"] == "move" and target is not None and windows[n][0] <= int(target) <= windows[n][1]:
+            quote.after_word, quote.at, quote.after_text = resolve_placement(project, words, ends[int(target)])
+        if why:
+            quote.reason = why + (" (from the quote bank)" if quote.reason.startswith("From the quote bank") else "")
+    project.quotes = [quote for quote in project.quotes if quote.id not in dropped]
+    return cost or 0.0
 
 
 def text_between(source_id: int, start: float, end: float) -> str:
@@ -591,5 +706,8 @@ def find_quotes(db: Session, project: Project, words: list[Word], cwd: Path, rep
         pieces = [(" ".join(line.text.strip() for line in lines), (lines[0].start_time, lines[-1].end_time)) for lines in runs]
         if add(request, source, start, end, pieces, pick["speaker"], pick["reason"]):
             answered.add(request)
+    if any(quote.status != "approved" for quote in project.quotes):
+        report("checking how each quote sits in the narration")
+        cost += _review(project, words, ends, universe, cwd)
     project.quotes.sort(key=lambda q: q.at)
     return cost

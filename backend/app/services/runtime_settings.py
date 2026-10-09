@@ -109,6 +109,20 @@ def set_editor_default_look(look: dict) -> None:
         SETTINGS_PATH.write_text(json.dumps(raw, indent=2), encoding="utf-8")
 
 
+def editor_default_voice() -> dict:
+    """The voice and its settings new video projects start with - whatever the user
+    last saved as default from a project's Voice tab."""
+    value = _read_raw().get("editor_default_voice")
+    return value if isinstance(value, dict) else {}
+
+
+def set_editor_default_voice(voice: dict) -> None:
+    with _lock:
+        raw = _read_raw()
+        raw["editor_default_voice"] = voice
+        SETTINGS_PATH.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+
 def current_caption_provider() -> str:
     raw = _read_raw()
     return raw.get("caption_provider") or settings.caption_provider

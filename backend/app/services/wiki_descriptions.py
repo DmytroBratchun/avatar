@@ -6,14 +6,17 @@ at no cost.
 A description is only known to lie between two spoken lines. When several
 descriptions share one such gap (a stretch with no dialogue), they are spread over
 it in page order, each taking a share of the gap in proportion to its length -
-longer descriptions cover more screen time."""
+longer descriptions cover more screen time.
+
+A comic's entries are placed on pages instead (wiki_comics.py), and a page's text is
+simply what the wiki has for that page, in its order."""
 
 from collections import defaultdict
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Scene, WikiEntry
+from app.db.models import Scene, Source, WikiEntry
 
 MAX_CHARS = 1500
 # a description counts for a scene when they overlap by at least this much...
@@ -22,6 +25,9 @@ MIN_OVERLAP_SECONDS = 1.0
 MIN_OVERLAP_SHARE = 0.5
 # a description wedged between two back-to-back lines still describes that moment
 MIN_RANGE_SECONDS = 2.0
+# a comic page with no description is still indexed when it has this much dialogue:
+# a page of talk tells what the page is about, which one line of a scene does not
+MIN_PAGE_DIALOGUE_CHARS = 100
 
 
 def description_ranges(entries: list[WikiEntry]) -> list[tuple[float, float, str]]:
@@ -66,6 +72,9 @@ def scene_texts(db: Session, source_id: int) -> dict[int, str]:
     )
     if not entries:
         return {}
+    source = db.get(Source, source_id)
+    if source is not None and source.kind == "comic":
+        return _page_texts(db, source_id, entries)
     scenes = list(db.execute(select(Scene).where(Scene.source_id == source_id).order_by(Scene.start_time)).scalars())
     descriptions = description_ranges(entries)
     lines = [e for e in entries if e.kind == "line" and e.start_time is not None]
@@ -89,4 +98,25 @@ def scene_texts(db: Session, source_id: int) -> dict[int, str]:
     for scene in scenes:
         if scene.id in seen:
             texts[scene.id] = "\n".join(seen[scene.id] + said.get(scene.id, []))[:MAX_CHARS]
+    return texts
+
+
+def _page_texts(db: Session, source_id: int, entries: list[WikiEntry]) -> dict[int, str]:
+    """scene id -> the wiki's account of that page of a comic: the panels described
+    and the lines spoken on it, in the wiki's order."""
+    on_page: dict[int, list[WikiEntry]] = defaultdict(list)
+    for entry in entries:
+        if entry.start_time is not None:
+            on_page[int(entry.start_time)].append(entry)
+    texts: dict[int, str] = {}
+    for scene in db.execute(select(Scene).where(Scene.source_id == source_id)).scalars():
+        page = on_page.get(int(scene.start_time))
+        if not page:
+            continue
+        described = any(e.kind == "desc" for e in page)
+        spoken = sum(len(e.text) for e in page if e.kind == "line")
+        if described or spoken >= MIN_PAGE_DIALOGUE_CHARS:
+            texts[scene.id] = "\n".join(
+                f"{e.speaker}: {e.text}" if e.kind == "line" and e.speaker else e.text for e in page
+            )[:MAX_CHARS]
     return texts

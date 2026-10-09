@@ -37,6 +37,7 @@ export interface ConfigOut {
 
 export interface FacetsOut {
   shows: string[];
+  comics?: string[];
   characters: string[];
   locations: string[];
   moods: string[];
@@ -200,6 +201,8 @@ export interface UniverseOut {
   regions: string[];
   // the universe's shows that are actually in the library
   available_shows: string[];
+  // its comic series
+  comics?: string[];
 }
 
 export interface EditorWord {
@@ -321,8 +324,8 @@ export function quoteSeconds(quote: EditorQuote): number {
   return quoteSpans(quote).reduce((sum, part) => sum + (part.end - part.start), 0);
 }
 
-// the three kinds of footage the Look tab styles separately
-export type LookFormat = "4:3" | "16:9" | "wide";
+// the three kinds of footage the Look tab styles separately, and comic pages
+export type LookFormat = "4:3" | "16:9" | "wide" | "comic";
 
 export type EditorStage = "voiceover" | "transcribe" | "quotes" | "beats" | "queries" | "select" | "background" | "music" | "render";
 
@@ -407,6 +410,13 @@ export interface LumeanVoice {
   preview_url?: string;
 }
 
+/** A script made ready for the voice, with the places where its wording changed (there should be none). */
+export interface VoiceText {
+  text: string;
+  changes: { was: string; now: string }[];
+  cost_usd: number | null;
+}
+
 export interface VoiceEstimate {
   ready: boolean;
   characters: number;
@@ -423,6 +433,18 @@ export interface EditorJob {
   progress: number | null;
   error: string | null;
   started_at: string;
+}
+
+// one of the Claude subscription's limits: how much is used and when it resets
+export interface ClaudeUsageWindow {
+  percent: number | null;
+  resets_at: string | null;
+}
+
+export interface ClaudeUsage {
+  available: boolean;
+  session?: ClaudeUsageWindow | null;
+  week?: ClaudeUsageWindow | null;
 }
 
 // a standard sound effect from the library shared by all projects
@@ -469,6 +491,7 @@ export interface EditorProject {
     comic_width: number;
     sound_effects: boolean;
     sfx_volume: number;
+    frame_rate: number;
   };
   word_count: number;
   timeline: EditorSegment[];
@@ -603,8 +626,20 @@ export const api = {
     (params.shows ?? []).forEach((show) => search.append("shows", show));
     return request<{ total: number; speakers: string[]; quotes: BankQuote[] }>(`/api/quote-bank?${search}`);
   },
-  createEditorProject: (payload: { title: string; universe: string; script_text?: string; shows: string[]; layout?: string }) =>
-    request<EditorProject>("/api/editor/projects", { method: "POST", body: JSON.stringify(payload) }),
+  createEditorProject: (payload: {
+    title: string;
+    universe: string;
+    script_text?: string;
+    footage_notes?: string;
+    shows: string[];
+    layout?: string;
+  }) => request<EditorProject>("/api/editor/projects", { method: "POST", body: JSON.stringify(payload) }),
+  // one Claude call: the script with directions to the voice, pauses and numbers spelled out
+  prepareVoiceText: (text: string, instructions: string) =>
+    request<VoiceText>("/api/editor/voice-text", { method: "POST", body: JSON.stringify({ text, instructions }) }),
+  getDefaultVoice: () => request<VoiceSettings>("/api/editor/voiceover/default-voice"),
+  saveDefaultVoice: (id: string) =>
+    request<VoiceSettings>(`/api/editor/projects/${id}/voiceover/save-default-voice`, { method: "POST" }),
   updateEditorProject: (
     id: string,
     payload: {
@@ -631,6 +666,7 @@ export const api = {
       comic_width?: number;
       sound_effects?: boolean;
       sfx_volume?: number;
+      frame_rate?: number;
     }
   ) => request<EditorProject>(`/api/editor/projects/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   // raw body upload - the backend has no multipart parser
@@ -681,6 +717,8 @@ export const api = {
       headers: { "Content-Type": "application/octet-stream" },
       body: file,
     }),
+  getEditorOutputPath: (id: string) => request<{ path: string }>(`/api/editor/projects/${id}/output-path`),
+  revealEditorOutput: (id: string) => request<{ path: string }>(`/api/editor/projects/${id}/output/reveal`, { method: "POST" }),
   // rendered_at in the URL so the browser drops its cached copy after a re-render
   editorOutputUrl: (id: string, renderedAt: string | null) =>
     `${BASE_URL}/api/editor/projects/${id}/output${buildQuery({ v: renderedAt ?? undefined })}`,
@@ -688,7 +726,7 @@ export const api = {
   editorPreviewUrl: (id: string, slot: number, format: LookFormat, version: string) =>
     `${BASE_URL}/api/editor/projects/${id}/preview${buildQuery({ slot, format, v: version })}`,
   getEditorPreviewInfo: (id: string) =>
-    request<Record<LookFormat, { source: "project" | "library" | "placeholder"; count: number }>>(
+    request<Record<LookFormat, { source: "project" | "library" | "placeholder" | "none"; count: number }>>(
       `/api/editor/projects/${id}/preview-info`
     ),
   editorAudioUrl: (id: string) => `${BASE_URL}/api/editor/projects/${id}/audio`,
@@ -704,6 +742,7 @@ export const api = {
     }),
   replanMusic: (id: string) => request<EditorProject>(`/api/editor/projects/${id}/music/replan`, { method: "POST" }),
   musicFileUrl: (id: string, file: string) => `${BASE_URL}/api/editor/projects/${id}/music/files/${file}`,
+  claudeUsage: () => request<ClaudeUsage>("/api/worker/claude-usage"),
   listSounds: () => request<EditorSound[]>("/api/editor/sounds"),
   generateSound: (name: string) => request<EditorSound[]>(`/api/editor/sounds/${name}/generate`, { method: "POST" }),
   soundFileUrl: (file: string) => `${BASE_URL}/api/editor/sounds/files/${encodeURIComponent(file)}`,

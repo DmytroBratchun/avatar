@@ -18,3 +18,6 @@ httpx>=0.27
 
 # comics: renders PDF pages to images (services/comics.py)
 pypdfium2==5.14.0
+
+# comics: reads the lettering off page scans, to place fan-wiki transcripts on pages (services/wiki_comics.py)
+rapidocr-onnxruntime==1.2.3

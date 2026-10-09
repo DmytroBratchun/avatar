@@ -274,12 +274,12 @@ def search_slot(ctx: SearchContext, slot: Slot, scene_ids: list[int] | None = No
         text_score = text_scores.get(scene_id)
         wiki_score = wiki_scores.get(scene_id)
         visual_score = visual_scores.get(scene_id)
+        best_text = max((s for s in (text_score, wiki_score) if s is not None), default=None)
         if source.kind == "comic":
             if scene.keyframe_paths:
-                candidates.append(page_candidate(scene, source, duration, combined[scene_id], text_score))
+                candidates.append(page_candidate(scene, source, duration, combined[scene_id], best_text))
             continue
         # cut around the keyframe unless a text index was the stronger reason for the match
-        best_text = max((s for s in (text_score, wiki_score) if s is not None), default=None)
         on_keyframe = visual_score is not None and (best_text is None or visual_score >= best_text)
         clip_start, clip_end = _clip_window(db, scene, source, duration, on_keyframe)
         candidates.append(

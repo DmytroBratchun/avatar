@@ -1,7 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import type { EditorProject, LumeanVoice, VoiceFragment, VoiceSettings } from "../api/client";
+import VoiceTextTools from "./VoiceTextTools";
 
 // ElevenLabs models Lumean offers, newest first
 const MODELS: { id: string; label: string }[] = [
@@ -204,6 +205,9 @@ export default function VoiceoverCard({
   const { data: voiceover, error } = useQuery({
     queryKey: ["editorVoiceover", project.id, project.updated_at],
     queryFn: () => api.getVoiceover(project.id),
+    // the key changes with every progress report: keep showing what was there, or the card
+    // collapses to "Loading…" for a moment and the page jumps to the top
+    placeholderData: keepPreviousData,
   });
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["editorVoiceover", project.id] });
 
@@ -222,6 +226,10 @@ export default function VoiceoverCard({
     mutationFn: (next: VoiceSettings) => api.setVoiceSettings(project.id, next),
     onSuccess: refresh,
   });
+  const saveDefault = useMutation({
+    mutationFn: () => api.saveDefaultVoice(project.id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["editorDefaultVoice"] }),
+  });
   const estimate = useMutation({ mutationFn: () => api.estimateVoiceover(project.id) });
   const generate = useMutation({ mutationFn: () => api.generateVoiceover(project.id), onSuccess: onChange });
   const sync = useMutation({ mutationFn: () => api.syncVoiceover(project.id), onSuccess: onChange });
@@ -238,13 +246,14 @@ export default function VoiceoverCard({
     const next = { ...settings, ...patch };
     setSettings(next);
     saveSettings.mutate(next);
+    saveDefault.reset();
   };
   const v3 = settings.model_id.startsWith("eleven_v3");
   const failed = state.fragments.filter((f) => f.status === "failed").length;
   const flagged = state.fragments.filter((f) => f.status === "policy_flagged").length;
   const inUse = state.final_version !== null && state.used_as_narration === state.final_version;
   const hasWork = project.word_count > 0;
-  const actionError = (generate.error ?? sync.error ?? retryFailed.error ?? use.error ?? saveSettings.error ?? saveScript.error) as Error | null;
+  const actionError = (generate.error ?? sync.error ?? retryFailed.error ?? use.error ?? saveSettings.error ?? saveScript.error ?? saveDefault.error) as Error | null;
 
   return (
     <>
@@ -278,6 +287,7 @@ export default function VoiceoverCard({
           direction to the voice and is not spoken - <code>[whispers]</code>, <code>[excited]</code> (v3 follows these
           best) - so don't leave footnotes like [1] in the text.
         </p>
+        <VoiceTextTools text={script} disabled={busy} onChange={setScript} />
         {scriptChanged && (
           <button className="small primary" disabled={busy || saveScript.isPending} onClick={() => saveScript.mutate()}>
             Save script
@@ -289,7 +299,7 @@ export default function VoiceoverCard({
         <h3>Voice</h3>
         <div style={{ display: "flex", gap: "0.6rem", alignItems: "center", flexWrap: "wrap" }}>
           <strong>{settings.voice_name || (settings.voice_id ? settings.voice_id : "No voice chosen")}</strong>
-          <button className="small" disabled={busy || !voiceover.has_key} onClick={() => setPicking((v) => !v)}>
+          <button className={settings.voice_id ? "small" : "small primary"} disabled={busy || !voiceover.has_key} onClick={() => setPicking((v) => !v)}>
             {picking ? "Close" : settings.voice_id ? "Change voice" : "Choose a voice"}
           </button>
         </div>
@@ -387,6 +397,14 @@ export default function VoiceoverCard({
         </label>
 
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginTop: "0.75rem", flexWrap: "wrap" }}>
+          <button
+            className="ghost small"
+            disabled={busy || !settings.voice_id || saveSettings.isPending || saveDefault.isPending}
+            onClick={() => saveDefault.mutate()}
+            title="New projects will start with this voice, model and settings."
+          >
+            {saveDefault.isSuccess ? "Saved as the default voice" : "Save as default voice"}
+          </button>
           <button className="small" disabled={busy || scriptChanged || !voiceover.has_key || !settings.voice_id || estimate.isPending} onClick={() => estimate.mutate()}>
             {estimate.isPending ? "Estimating…" : "Estimate cost"}
           </button>
@@ -399,6 +417,10 @@ export default function VoiceoverCard({
             {state.order_id ? "Voice the whole script again (paid)" : "Voice the script (paid)"}
           </button>
           {scriptChanged && <span className="hint" style={{ margin: 0 }}>Save the script first.</span>}
+          {!scriptChanged && voiceover.has_key && !settings.voice_id && (
+            <span className="hint" style={{ margin: 0 }}>Choose a voice above first - nothing is voiced until you press the button.</span>
+          )}
+          {!scriptChanged && !voiceover.has_key && <span className="hint" style={{ margin: 0 }}>Add the Lumean API key first.</span>}
         </div>
         {estimate.isError && <p className="error-text">{(estimate.error as Error).message}</p>}
         {estimate.data && (

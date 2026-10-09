@@ -54,6 +54,9 @@ export default function ScenePicker({
   const currentShow = show ?? showNames[0] ?? null;
   const episodes = usable.filter((s) => (s.show_title ?? "Untitled") === currentShow);
   const currentSource = episodes.find((e) => e.id === sourceId) ?? episodes[0] ?? null;
+  // a comic: its "scenes" are pages, shown as pictures, with no time to start at
+  const comic = currentSource?.kind === "comic";
+  const pageLabel = (scene: SceneOut) => `page ${Math.round(scene.start_time) + 1}`;
 
   const { data: scenes, isLoading } = useQuery({
     queryKey: ["scenes", "source", currentSource?.id],
@@ -108,9 +111,9 @@ export default function ScenePicker({
           <select style={{ width: "auto", maxWidth: "380px" }} value={currentSource?.id ?? ""} onChange={(e) => setSourceId(Number(e.target.value))}>
             {episodes.map((e) => (
               <option key={e.id} value={e.id}>
-                {e.book != null ? `Book ${e.book} ` : ""}
-                {e.episode_number != null ? `Ep ${e.episode_number} · ` : ""}
-                {(e.episode_title ?? "").split(" - ").pop()}
+                {e.kind === "comic"
+                  ? `${e.episode_number != null ? `Part ${e.episode_number}` : "Whole comic"} · ${e.scene_count} pages`
+                  : `${e.book != null ? `Book ${e.book} ` : ""}${e.episode_number != null ? `Ep ${e.episode_number} · ` : ""}${(e.episode_title ?? "").split(" - ").pop()}`}
               </option>
             ))}
           </select>
@@ -122,8 +125,17 @@ export default function ScenePicker({
           />
         </div>
         <p className="hint" style={{ margin: "0.4rem 0" }}>
-          {isLoading ? "Loading scenes…" : `${shown.length} scenes, in episode order.`} The clip is cut around the picture you see,
-          {clipSeconds.toFixed(1)}s long. Scenes without a caption can only be found by scrolling.
+          {comic ? (
+            <>
+              {isLoading ? "Loading pages…" : `${shown.length} pages, in order.`} The page scrolls on screen for {clipSeconds.toFixed(1)}s.
+              Pages without a description can only be found by scrolling.
+            </>
+          ) : (
+            <>
+              {isLoading ? "Loading scenes…" : `${shown.length} scenes, in episode order.`} The clip is cut around the picture you see,
+              {clipSeconds.toFixed(1)}s long. Scenes without a caption can only be found by scrolling.
+            </>
+          )}
         </p>
 
         <div style={{ flex: 1, minHeight: 0, display: "flex", gap: "0.75rem" }}>
@@ -156,10 +168,17 @@ export default function ScenePicker({
                   src={api.keyframeUrl(scene.id, 0)}
                   alt=""
                   loading="lazy"
-                  style={{ width: "100%", aspectRatio: "4 / 3", objectFit: "cover", display: "block", borderRadius: "var(--radius-sm)" }}
+                  style={{
+                    width: "100%",
+                    aspectRatio: comic ? "2 / 3" : "4 / 3",
+                    objectFit: "cover",
+                    objectPosition: "top",
+                    display: "block",
+                    borderRadius: "var(--radius-sm)",
+                  }}
                 />
                 <div className="hint" style={{ margin: "0.1rem 0 0", fontSize: "0.7rem" }}>
-                  {clock(scene.start_time)} · {(scene.end_time - scene.start_time).toFixed(1)}s
+                  {comic ? pageLabel(scene) : `${clock(scene.start_time)} · ${(scene.end_time - scene.start_time).toFixed(1)}s`}
                 </div>
               </button>
             ))}
@@ -169,32 +188,36 @@ export default function ScenePicker({
           <div style={{ width: "360px", flexShrink: 0, overflowY: "auto" }}>
             {preview ? (
               <>
-                {/* #t=start,end plays just this scene out of the episode */}
-                <video
-                  key={preview.id}
-                  src={`${api.streamUrl(preview.source_id)}#t=${preview.start_time},${preview.end_time}`}
-                  controls
-                  autoPlay
-                  muted
-                  style={{ width: "100%", display: "block" }}
-                />
-                <p className="hint" style={{ margin: "0.3rem 0" }}>
+                {comic ? (
+                  <img key={preview.id} src={api.keyframeUrl(preview.id, 0)} alt="" style={{ width: "100%", display: "block" }} />
+                ) : (
+                  /* #t=start,end plays just this scene out of the episode */
+                  <video
+                    key={preview.id}
+                    src={`${api.streamUrl(preview.source_id)}#t=${preview.start_time},${preview.end_time}`}
+                    controls
+                    autoPlay
+                    muted
+                    style={{ width: "100%", display: "block" }}
+                  />
+                )}
+                <p className="hint" style={{ margin: "0.3rem 0", display: comic ? "none" : undefined }}>
                   {clock(preview.start_time)}–{clock(preview.end_time)} · {(preview.end_time - preview.start_time).toFixed(1)}s
                 </p>
                 <button className="small primary" onClick={() => onPickScene(preview)} disabled={busy}>
-                  {busy ? "Adding…" : "Use this scene"}
+                  {busy ? "Adding…" : comic ? "Use this page" : "Use this scene"}
                 </button>
                 <p style={{ fontSize: "0.8rem", marginTop: "0.5rem" }}>
-                  {preview.context_description ?? preview.visual_description ?? <span className="hint">No caption for this scene.</span>}
+                  {preview.context_description ?? preview.wiki_description ?? preview.visual_description ?? <span className="hint">{comic ? "This page has no description yet." : "No caption for this scene."}</span>}
                 </p>
               </>
             ) : (
-              <p className="hint">Click a scene to watch it here. Double-click to use it straight away.</p>
+              <p className="hint">{comic ? "Click a page to see it here" : "Click a scene to watch it here"}. Double-click to use it straight away.</p>
             )}
           </div>
         </div>
 
-        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap", marginTop: "0.6rem" }}>
+        <div style={{ display: comic ? "none" : "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap", marginTop: "0.6rem" }}>
           <span className="hint" style={{ margin: 0 }}>Or start at an exact time in this episode</span>
           <input style={{ width: "5.5rem" }} placeholder="8:18" value={timeText} onChange={(e) => setTimeText(e.target.value)} />
           <button

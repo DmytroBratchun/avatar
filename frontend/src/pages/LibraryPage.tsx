@@ -642,7 +642,7 @@ export default function LibraryPage() {
                   style={{ cursor: "pointer", fontWeight: 600 }}
                   onClick={() => setSelectedShow(show)}
                 >
-                  {show} ({total})
+                  {show}{total > 1 && ` (${total})`}
                 </div>
                 {selectedShow === show &&
                   books.map(([book, count]) => (
@@ -652,7 +652,7 @@ export default function LibraryPage() {
                       style={{ cursor: "pointer", paddingLeft: "1.1rem", fontSize: "0.82rem" }}
                       onClick={() => setSelectedBook(book)}
                     >
-                      {book} ({count})
+                      {book}{count > 1 && ` (${count})`}
                     </div>
                   ))}
               </div>

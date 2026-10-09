@@ -15,6 +15,7 @@ import json
 import os
 import re
 import threading
+import time
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -261,6 +262,9 @@ class RenderSettings(BaseModel):
     # played this many dB below their normalised peak
     sound_effects: bool = True
     sfx_volume: float = 12.0
+    # 24: the footage's own 23.976 fps. 48: twice that - footage shows each frame
+    # twice, but a scrolling comic page or panning photo moves half as far per frame
+    frame_rate: int = 24
 
 
 class Project(BaseModel):
@@ -323,7 +327,16 @@ def _write_json(path: Path, data: dict | list) -> None:
     # write-then-rename so a crash mid-write can't leave a truncated project.json
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
+    # Windows refuses to replace a file someone has open - another request reading it,
+    # an antivirus or the search indexer looking at it - for the moment they hold it
+    for attempt in range(20):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 19:
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 def _slugify(title: str) -> str:
@@ -365,7 +378,8 @@ def project_shows(project: "Project") -> list[str]:
 
 
 def create_project(
-    title: str, script_text: str | None, shows: list[str], layout: str | None, universe: str = ""
+    title: str, script_text: str | None, shows: list[str], layout: str | None, universe: str = "",
+    footage_notes: str | None = None,
 ) -> Project:
     with _lock:
         root = root_dir()
@@ -384,6 +398,7 @@ def create_project(
             created_at=created,
             updated_at=created,
             script_text=script_text or None,
+            footage_notes=(footage_notes or "").strip() or None,
             universe=universe,
             shows=shows,
             settings=default_settings(layout),
@@ -420,7 +435,9 @@ def list_projects() -> list[Project]:
     for path in sorted(root.iterdir()):
         if (path / PROJECT_FILE).is_file():
             try:
-                projects.append(Project.model_validate_json((path / PROJECT_FILE).read_text(encoding="utf-8")))
+                with _lock:
+                    text = (path / PROJECT_FILE).read_text(encoding="utf-8")
+                projects.append(Project.model_validate_json(text))
             except ValueError:
                 continue
     projects.sort(key=lambda p: p.created_at, reverse=True)

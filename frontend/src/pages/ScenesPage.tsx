@@ -12,16 +12,21 @@ export default function ScenesPage() {
   const [characters, setCharacters] = useState<string[]>([]);
   const [shows, setShows] = useState<string[]>([]);
   const [captionStatus, setCaptionStatus] = useState("");
+  // "" = everything, "video" = episodes, "comic" = comic pages
+  const [kind, setKind] = useState(searchParams.get("kind") ?? "");
+  const [page, setPage] = useState("");
   const [offset, setOffset] = useState(0);
   const limit = 30;
 
   const { data: facets } = useQuery({ queryKey: ["facets"], queryFn: api.getFacets });
 
   const { data: scenes, isFetching } = useQuery({
-    queryKey: ["scenesBrowse", book, episode, characters, shows, captionStatus, offset],
+    queryKey: ["scenesBrowse", kind, book, episode, page, characters, shows, captionStatus, offset],
     queryFn: () =>
       api.listScenes({
-        book: book || undefined,
+        kind: kind || undefined,
+        page: kind === "comic" && page ? page : undefined,
+        book: kind === "comic" ? undefined : book || undefined,
         episode_number: episode || undefined,
         characters: characters.length ? characters : undefined,
         shows: shows.length ? shows : undefined,
@@ -35,6 +40,11 @@ export default function ScenesPage() {
     setOffset(0);
   }
 
+  const comics = facets?.comics ?? [];
+  // the shows list follows the kind chosen: episodes' shows, or comic series
+  const showChoices =
+    kind === "comic" ? comics : kind === "video" ? (facets?.shows ?? []).filter((s) => !comics.includes(s)) : (facets?.shows ?? []);
+
   return (
     <div>
       <h1>Scenes</h1>
@@ -46,26 +56,46 @@ export default function ScenesPage() {
         <aside className="filters">
           <div className="card">
             <h3>Filters</h3>
-            <label>Shows</label>
+            <label>Type</label>
+            <select
+              value={kind}
+              onChange={(e) => {
+                setKind(e.target.value);
+                setShows([]);
+                setBook("");
+                setEpisode("");
+                setPage("");
+                resetPage();
+              }}
+            >
+              <option value="">Everything</option>
+              <option value="video">Episodes</option>
+              <option value="comic">Comic pages</option>
+            </select>
+            <label style={{ marginTop: "0.75rem" }}>{kind === "comic" ? "Comics" : "Shows"}</label>
             <TagMultiSelect
               value={shows}
               onChange={(v) => {
                 setShows(v);
                 resetPage();
               }}
-              suggestions={facets?.shows ?? []}
-              placeholder="e.g. Avatar"
+              suggestions={showChoices}
+              placeholder={kind === "comic" ? "e.g. The Promise" : "e.g. Avatar"}
             />
-            <label style={{ marginTop: "0.75rem" }}>Book</label>
-            <input
-              placeholder="1-3"
-              value={book}
-              onChange={(e) => {
-                setBook(e.target.value);
-                resetPage();
-              }}
-            />
-            <label style={{ marginTop: "0.75rem" }}>Episode</label>
+            {kind !== "comic" && (
+              <>
+                <label style={{ marginTop: "0.75rem" }}>Book</label>
+                <input
+                  placeholder="1-3"
+                  value={book}
+                  onChange={(e) => {
+                    setBook(e.target.value);
+                    resetPage();
+                  }}
+                />
+              </>
+            )}
+            <label style={{ marginTop: "0.75rem" }}>{kind === "comic" ? "Part" : "Episode"}</label>
             <input
               placeholder="e.g. 3"
               value={episode}
@@ -74,6 +104,19 @@ export default function ScenesPage() {
                 resetPage();
               }}
             />
+            {kind === "comic" && (
+              <>
+                <label style={{ marginTop: "0.75rem" }}>Page</label>
+                <input
+                  placeholder="e.g. 16"
+                  value={page}
+                  onChange={(e) => {
+                    setPage(e.target.value);
+                    resetPage();
+                  }}
+                />
+              </>
+            )}
             <label style={{ marginTop: "0.75rem" }}>Characters</label>
             <TagMultiSelect
               value={characters}

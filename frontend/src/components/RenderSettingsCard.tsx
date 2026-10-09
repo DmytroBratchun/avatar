@@ -147,6 +147,11 @@ export default function RenderSettingsCard({
           <option value="framed">Framed - old 4:3 footage sits in a frame over a blurred background</option>
           <option value="simple">Simple - every clip fills the screen as far as it can</option>
         </select>
+        <label style={{ marginTop: "0.5rem" }}>Frame rate</label>
+        <select style={{ width: "auto" }} value={settings.frame_rate} disabled={busy} onChange={(e) => save({ frame_rate: Number(e.target.value) })}>
+          <option value={24}>24 fps - the footage's own rate</option>
+          <option value={48}>48 fps - smoother comic scrolling and photo pans; footage looks the same</option>
+        </select>
         <div className="field-row" style={{ marginTop: "0.5rem" }}>
           <Slider label={`Background blur: ${Math.round(blur)}`} value={blur} min={0} max={100} step={1} disabled={busy} onChange={setBlur} onCommit={() => save({ blur })} />
           <Slider
@@ -315,7 +320,13 @@ export default function RenderSettingsCard({
         />
       </Section>
 
-      <Section title="Comic pages" subtitle="a page scrolling down the screen, in place of a clip">
+      <Section
+        title="Comic pages"
+        subtitle="a page scrolling down or up the screen, in place of a clip"
+        format="comic"
+        active={format === "comic"}
+        onFocus={onFormat}
+      >
         <label title="How wide a comic page is shown, as a share of the screen. Wider: more of the page to scroll through, but a softer picture - the scans are small.">
           Page width
         </label>

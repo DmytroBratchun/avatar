@@ -1,3 +1,4 @@
+import ClaudeUsage from "./components/ClaudeUsage";
 import { useEffect, useRef, useState } from "react";
 import { NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import "./App.css";
@@ -131,6 +132,7 @@ function App() {
           </>
         )}
         <div className="topnav-spacer" />
+        <ClaudeUsage />
         <div className="app-launcher" ref={launcherRef}>
           <button
             className="theme-toggle"

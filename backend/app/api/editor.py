@@ -6,13 +6,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from app.editor import jobs, store, voiceover
+from app.editor import jobs, store, voice_text, voiceover
 from app.editor.store import Project, Word
 from app.services.lumean import Lumean, LumeanError
 from app.services.runtime_settings import (
     current_lumean_api_key,
     editor_projects_root,
     set_editor_default_look,
+    set_editor_default_voice,
     set_editor_projects_root,
 )
 
@@ -34,9 +35,15 @@ class EditorSettingsIn(BaseModel):
 class ProjectCreateIn(BaseModel):
     title: str
     script_text: str | None = None
+    footage_notes: str | None = None
     universe: str = ""
     shows: list[str] = []
     layout: str | None = None  # None = the saved default look's layout
+
+
+class VoiceTextIn(BaseModel):
+    text: str
+    instructions: str = ""  # what the author wants from the delivery, in their own words
 
 
 class ProjectUpdateIn(BaseModel):
@@ -63,6 +70,7 @@ class ProjectUpdateIn(BaseModel):
     comic_width: float | None = None
     sound_effects: bool | None = None
     sfx_volume: float | None = None
+    frame_rate: int | None = None
 
 
 def _load(project_id: str) -> Project:
@@ -108,7 +116,9 @@ def create_project(payload: ProjectCreateIn) -> Project:
     if payload.layout is not None and payload.layout not in LAYOUTS:
         raise HTTPException(400, f"Unknown layout: {payload.layout}")
     try:
-        return store.create_project(title, payload.script_text, payload.shows, payload.layout, payload.universe)
+        return store.create_project(
+            title, payload.script_text, payload.shows, payload.layout, payload.universe, payload.footage_notes
+        )
     except store.RootNotConfigured:
         raise HTTPException(409, "Editor projects folder is not set")
 
@@ -175,6 +185,8 @@ def update_project(project_id: str, payload: ProjectUpdateIn) -> Project:
             p.settings.sound_effects = data["sound_effects"]
         if data.get("sfx_volume") is not None:
             p.settings.sfx_volume = min(30.0, max(0.0, data["sfx_volume"]))
+        if data.get("frame_rate") is not None:
+            p.settings.frame_rate = 48 if data["frame_rate"] == 48 else 24
 
     return store.update_project(project_id, apply)
 
@@ -356,6 +368,38 @@ def list_voices(search: str = "", page: int = 0, gender: str = "", language: str
             search=search.strip(), page=max(0, page), gender=gender, required_languages=language
         )
     )
+
+
+@router.post("/voice-text")
+def prepare_voice_text(payload: VoiceTextIn) -> dict:
+    """A script made ready for the voice: directions like [whispers] where the
+    delivery changes, pauses, numbers spelled out (one Claude call). `changes` lists
+    the places where the wording itself came back different - there should be none."""
+    if not payload.text.strip():
+        raise HTTPException(400, "There is no script to prepare")
+    try:
+        text, changes, cost = voice_text.optimize(payload.text, payload.instructions)
+    except (RuntimeError, subprocess.TimeoutExpired) as exc:
+        raise HTTPException(502, f"Could not prepare the script: {exc}")
+    return {"text": text, "changes": changes, "cost_usd": cost}
+
+
+@router.get("/voiceover/default-voice", response_model=voiceover.VoiceSettings)
+def get_default_voice() -> voiceover.VoiceSettings:
+    """The voice new projects start with (no voice_id when none was saved)."""
+    return voiceover.default_voice()
+
+
+@router.post("/projects/{project_id}/voiceover/save-default-voice", response_model=voiceover.VoiceSettings)
+def save_default_voice(project_id: str) -> voiceover.VoiceSettings:
+    """Makes this project's voice and its settings the starting point for new
+    projects. Existing projects are not changed."""
+    _load(project_id)
+    settings = voiceover.load(project_id).settings
+    if not settings.voice_id:
+        raise HTTPException(400, "Choose a voice first")
+    set_editor_default_voice(settings.model_dump())
+    return voiceover.default_voice()
 
 
 @router.get("/voiceover/own-voices")
@@ -687,13 +731,31 @@ async def upload_frame(filename: str, request: Request) -> list[str]:
 
 @router.get("/projects/{project_id}/output")
 def get_output(project_id: str):
+    return FileResponse(_output_path(project_id), media_type="video/mp4")
+
+
+def _output_path(project_id: str) -> Path:
     project = _load(project_id)
     if not project.output_file:
         raise HTTPException(404, "Project has not been rendered")
     path = store.project_dir(project_id) / project.output_file
     if not path.is_file():
         raise HTTPException(404, "Rendered file missing on disk")
-    return FileResponse(path, media_type="video/mp4")
+    return path
+
+
+@router.get("/projects/{project_id}/output-path")
+def get_output_path(project_id: str) -> dict:
+    """Where the rendered video is on disk, to copy."""
+    return {"path": str(_output_path(project_id).resolve())}
+
+
+@router.post("/projects/{project_id}/output/reveal")
+def reveal_output(project_id: str) -> dict:
+    """Opens Explorer on the rendered video's folder with the file selected."""
+    path = _output_path(project_id).resolve()
+    subprocess.Popen(["explorer", f"/select,{path}"])
+    return {"path": str(path)}
 
 
 class SlotManualIn(BaseModel):
@@ -743,21 +805,28 @@ def set_slot_manually(project_id: str, beat_id: str, slot_index: int, payload: S
             ).scalars().first()
         else:
             raise HTTPException(400, "Give a scene, or an episode and a start time")
-        candidate = Candidate(
-            scene_id=scene.id if scene else 0,
-            source_id=source.id,
-            file_path=source.file_path,
-            show_title=source.show_title,
-            book=source.book,
-            episode_number=source.episode_number,
-            scene_start=scene.start_time if scene else start,
-            scene_end=scene.end_time if scene else start + duration,
-            clip_start=round(start, 3),
-            clip_end=round(start + duration, 3),
-            description=scene.context_description if scene else None,
-            score=0.0,
-            slivers=count_slivers(db, source.id, start, start + duration),
-        )
+        if source.kind == "comic":
+            from app.editor.comic_pages import page_candidate
+
+            if scene is None or not scene.keyframe_paths:
+                raise HTTPException(400, "Pick a page of the comic")
+            candidate = page_candidate(scene, source, duration, 0.0)
+        else:
+            candidate = Candidate(
+                scene_id=scene.id if scene else 0,
+                source_id=source.id,
+                file_path=source.file_path,
+                show_title=source.show_title,
+                book=source.book,
+                episode_number=source.episode_number,
+                scene_start=scene.start_time if scene else start,
+                scene_end=scene.end_time if scene else start + duration,
+                clip_start=round(start, 3),
+                clip_end=round(start + duration, 3),
+                description=scene.context_description if scene else None,
+                score=0.0,
+                slivers=count_slivers(db, source.id, start, start + duration),
+            )
     finally:
         db.close()
 
@@ -921,11 +990,11 @@ def update_quote(project_id: str, quote_id: str, payload: QuoteUpdateIn) -> Proj
 def get_preview(project_id: str, slot: int = 0, format: str | None = None):
     """A still of one clip with the project's current look applied. `format` ("4:3",
     "16:9" or "wide") asks for a clip of that format - from the project, the library,
-    or a placeholder."""
-    from app.editor.render import FORMATS, render_preview
+    or a placeholder; "comic" for a comic page, from the project or the library."""
+    from app.editor.render import COMIC, FORMATS, render_preview
 
     project = _load(project_id)
-    if format is not None and format not in FORMATS:
+    if format is not None and format not in (*FORMATS, COMIC):
         raise HTTPException(400, f"Unknown format: {format}")
     try:
         path = render_preview(project, slot, format)
@@ -937,11 +1006,11 @@ def get_preview(project_id: str, slot: int = 0, format: str | None = None):
 @router.get("/projects/{project_id}/preview-info")
 def get_preview_info(project_id: str) -> dict:
     """For each format: where its preview clips come from and how many there are."""
-    from app.editor.render import FORMATS, preview_clips
+    from app.editor.render import COMIC, FORMATS, preview_clips
 
     project = _load(project_id)
     info = {}
-    for fmt in FORMATS:
+    for fmt in (*FORMATS, COMIC):
         source, clips = preview_clips(project, fmt)
         info[fmt] = {"source": source, "count": len(clips)}
     return info

@@ -83,6 +83,8 @@ class SceneUpdateIn(BaseModel):
 
 class FacetsOut(BaseModel):
     shows: list[str]
+    # titles of the comic series in the library (also among shows)
+    comics: list[str] = []
     characters: list[str]
     locations: list[str]
     moods: list[str]

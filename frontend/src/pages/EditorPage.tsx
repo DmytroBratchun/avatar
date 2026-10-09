@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import type { EditorProject } from "../api/client";
+import VoiceTextTools from "../components/VoiceTextTools";
 
 function formatDuration(seconds: number | null): string {
   if (seconds == null) return "-";
@@ -73,7 +74,7 @@ function ProjectsRootCard({ root }: { root: string | null }) {
   );
 }
 
-function NewProjectCard() {
+function NewProjectModal({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { data: universes } = useQuery({ queryKey: ["universes"], queryFn: api.listUniverses });
@@ -82,10 +83,13 @@ function NewProjectCard() {
   const universe = universes?.find((u) => u.id === universeId) ?? universes?.[0];
 
   const [title, setTitle] = useState("");
+  // where the narration comes from: an audio file, or the script voiced here
+  const [narration, setNarration] = useState<"audio" | "script">("audio");
   const [audio, setAudio] = useState<File | null>(null);
   const [scriptText, setScriptText] = useState("");
   const [shows, setShows] = useState<string[]>([]);
   const { data: defaultLook } = useQuery({ queryKey: ["editorDefaultLook"], queryFn: api.getEditorDefaultLook });
+  const { data: defaultVoice } = useQuery({ queryKey: ["editorDefaultVoice"], queryFn: api.getDefaultVoice });
   // null until the user picks one; then the saved default look decides
   const [chosenLayout, setLayout] = useState<string | null>(null);
   const layout = chosenLayout ?? defaultLook?.layout ?? "framed";
@@ -93,14 +97,17 @@ function NewProjectCard() {
   const createMutation = useMutation({
     mutationFn: async () => {
       const project = await api.createEditorProject({ title, universe: universe?.id ?? "", script_text: scriptText || undefined, shows, layout });
-      if (audio) await api.uploadEditorAudio(project.id, audio);
+      if (narration === "audio" && audio) await api.uploadEditorAudio(project.id, audio);
       return project;
     },
     onSuccess: (project) => {
       queryClient.invalidateQueries({ queryKey: ["editorProjects"] });
-      navigate(`/editor/${project.id}`);
+      // a project made from a script is voiced next
+      navigate(narration === "script" ? `/editor/${project.id}?tab=voice` : `/editor/${project.id}`);
     },
   });
+  const busy = createMutation.isPending;
+  const ready = title.trim() !== "" && (narration === "audio" || scriptText.trim() !== "");
 
   async function loadScriptFile(file: File | undefined) {
     if (file) setScriptText(await file.text());
@@ -111,65 +118,116 @@ function NewProjectCard() {
   }
 
   return (
-    <div className="card" style={{ marginTop: "0.75rem" }}>
-      <h3>New video</h3>
+    <div
+      style={{
+        position: "fixed",
+        inset: 0,
+        background: "rgba(0,0,0,0.4)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 100,
+      }}
+    >
+      {/* no closing on a click outside: a pasted script would be lost */}
+      <div className="card" style={{ width: "680px", maxWidth: "94vw", maxHeight: "92vh", overflowY: "auto" }}>
+        <div className="card-header">
+          <h3 style={{ margin: 0 }}>New video</h3>
+          <button className="ghost small" onClick={onClose} disabled={busy}>
+            Close
+          </button>
+        </div>
 
-      <label>Title</label>
-      <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Why airbending is underrated" />
+        <label>Title</label>
+        <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Why airbending is underrated" />
 
-      <label style={{ marginTop: "0.75rem" }}>Narration audio</label>
-      <input type="file" accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg" onChange={(e) => setAudio(e.target.files?.[0] ?? null)} />
-
-      <label style={{ marginTop: "0.75rem" }}>Script (optional)</label>
-      <p className="hint" style={{ marginTop: 0 }}>
-        The narration text, if you have it - used to get names like Aang or Ba Sing Se right. Paste it or load a file.
-      </p>
-      <textarea rows={5} value={scriptText} onChange={(e) => setScriptText(e.target.value)} />
-      <input
-        type="file"
-        accept=".txt,.md,text/plain"
-        style={{ marginTop: "0.4rem" }}
-        onChange={(e) => loadScriptFile(e.target.files?.[0])}
-      />
-
-      <label style={{ marginTop: "0.75rem" }}>Universe</label>
-      <select
-        value={universe?.id ?? ""}
-        onChange={(e) => {
-          setUniverseId(e.target.value);
-          setShows([]); // shows of one universe make no sense in another
-        }}
-      >
-        {(universes ?? []).map((u) => (
-          <option key={u.id} value={u.id}>
-            {u.name}
-          </option>
-        ))}
-      </select>
-
-      <label style={{ marginTop: "0.75rem" }}>Footage from</label>
-      <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
-        {(universe?.available_shows ?? []).map((show) => (
-          <label key={show} style={{ display: "flex", alignItems: "center", gap: "0.35rem", margin: 0 }}>
-            <input type="checkbox" style={{ width: "auto" }} checked={shows.includes(show)} onChange={() => toggleShow(show)} />
-            {show}
+        <label style={{ marginTop: "0.75rem" }}>Narration</label>
+        <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", margin: 0 }}>
+            <input type="radio" style={{ width: "auto" }} checked={narration === "audio"} onChange={() => setNarration("audio")} />
+            Audio I already have
           </label>
-        ))}
-      </div>
-      <p className="hint" style={{ marginTop: "0.3rem" }}>Leave all unchecked to use everything in this universe.</p>
+          <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", margin: 0 }}>
+            <input type="radio" style={{ width: "auto" }} checked={narration === "script"} onChange={() => setNarration("script")} />
+            From a script, voiced here
+          </label>
+        </div>
 
-      <label style={{ marginTop: "0.75rem" }}>Layout</label>
-      <select value={layout} onChange={(e) => setLayout(e.target.value)}>
-        <option value="framed">Framed - clip in a frame over a blurred background</option>
-        <option value="simple">Simple - clip fills the screen</option>
-      </select>
+        {narration === "audio" && (
+          <>
+            <label style={{ marginTop: "0.75rem" }}>Narration audio</label>
+            <input type="file" accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg" onChange={(e) => setAudio(e.target.files?.[0] ?? null)} />
+          </>
+        )}
 
-      <div style={{ marginTop: "0.75rem" }}>
-        <button className="primary" onClick={() => createMutation.mutate()} disabled={!title.trim() || createMutation.isPending}>
-          {createMutation.isPending ? "Creating…" : "Create"}
-        </button>
+        <label style={{ marginTop: "0.75rem" }}>{narration === "script" ? "Script" : "Script (optional)"}</label>
+        <p className="hint" style={{ marginTop: 0 }}>
+          {narration === "script"
+            ? "The narration text, read as written. Anything in square brackets is a direction to the voice and is not spoken. Paste it or load a file."
+            : "The narration text, if you have it - used to get names like Aang or Ba Sing Se right. Paste it or load a file."}
+        </p>
+        <textarea rows={narration === "script" ? 12 : 5} value={scriptText} disabled={busy} onChange={(e) => setScriptText(e.target.value)} />
+        <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", marginTop: "0.4rem", flexWrap: "wrap" }}>
+          <input type="file" accept=".txt,.md,text/plain" style={{ flex: 1 }} onChange={(e) => loadScriptFile(e.target.files?.[0])} />
+          {scriptText.trim() && (
+            <span className="hint" style={{ margin: 0 }}>
+              {scriptText.trim().length.toLocaleString()} characters
+            </span>
+          )}
+        </div>
+        {narration === "script" && (
+          <>
+            <VoiceTextTools text={scriptText} disabled={busy} onChange={setScriptText} />
+            <p className="hint">
+              {defaultVoice?.voice_id
+                ? `Voice: ${defaultVoice.voice_name || defaultVoice.voice_id} (the default) - it can be changed on the Voice tab before anything is ordered.`
+                : "The voice is chosen on the project's Voice tab, which opens next; nothing is ordered until you ask there."}
+            </p>
+          </>
+        )}
+
+        <label style={{ marginTop: "0.75rem" }}>Universe</label>
+        <select
+          value={universe?.id ?? ""}
+          onChange={(e) => {
+            setUniverseId(e.target.value);
+            setShows([]); // shows of one universe make no sense in another
+          }}
+        >
+          {(universes ?? []).map((u) => (
+            <option key={u.id} value={u.id}>
+              {u.name}
+            </option>
+          ))}
+        </select>
+
+        <label style={{ marginTop: "0.75rem" }}>Footage from</label>
+        <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
+          {(universe?.available_shows ?? []).map((show) => (
+            <label key={show} style={{ display: "flex", alignItems: "center", gap: "0.35rem", margin: 0 }}>
+              <input type="checkbox" style={{ width: "auto" }} checked={shows.includes(show)} onChange={() => toggleShow(show)} />
+              {show}
+            </label>
+          ))}
+        </div>
+        <p className="hint" style={{ marginTop: "0.3rem" }}>Leave all unchecked to use everything in this universe.</p>
+
+        <label style={{ marginTop: "0.75rem" }}>Layout</label>
+        <select value={layout} onChange={(e) => setLayout(e.target.value)}>
+          <option value="framed">Framed - clip in a frame over a blurred background</option>
+          <option value="simple">Simple - clip fills the screen</option>
+        </select>
+
+        <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.9rem" }}>
+          <button className="primary" onClick={() => createMutation.mutate()} disabled={!ready || busy}>
+            {busy ? "Creating…" : "Create"}
+          </button>
+          <button className="ghost" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+        </div>
+        {createMutation.isError && <p className="error-text">{(createMutation.error as Error).message}</p>}
       </div>
-      {createMutation.isError && <p className="error-text">{(createMutation.error as Error).message}</p>}
     </div>
   );
 }
@@ -182,6 +240,8 @@ export default function EditorPage() {
     enabled: !!settings?.projects_root,
   });
 
+  const [creating, setCreating] = useState(false);
+
   if (!settings) return <p>Loading…</p>;
 
   return (
@@ -192,10 +252,15 @@ export default function EditorPage() {
       {settings.projects_root && (
         <>
           <div className="card">
-            <h3>Videos</h3>
+            <div className="card-header">
+              <h3 style={{ margin: 0 }}>Videos</h3>
+              <button className="primary" onClick={() => setCreating(true)}>
+                New video
+              </button>
+            </div>
             {projects && projects.length === 0 && (
               <p className="hint" style={{ margin: 0 }}>
-                No videos yet - create one below.
+                No videos yet.
               </p>
             )}
             {projects && projects.length > 0 && (
@@ -223,7 +288,7 @@ export default function EditorPage() {
               </table>
             )}
           </div>
-          <NewProjectCard />
+          {creating && <NewProjectModal onClose={() => setCreating(false)} />}
         </>
       )}
     </div>

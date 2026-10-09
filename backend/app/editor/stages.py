@@ -17,6 +17,8 @@ from app.editor.voiceover import run_voiceover
 
 Report = Callable[[str], None]
 
+from app.editor.voice_text import spoken
+
 logger = logging.getLogger(__name__)
 
 # --- transcribe -------------------------------------------------------------
@@ -27,16 +29,87 @@ def _hotwords_from_script(script_text: str | None, limit: int = 40) -> str | Non
     most often mangles and the ones search depends on most. A capitalised word
     counts as a name when it never also appears in lowercase, which drops ordinary
     sentence-initial words without needing a dictionary."""
-    if not script_text:
+    # without the directions to the voice ([whispers]) a voiced script carries
+    tokens = re.findall(r"[A-Za-z][A-Za-z'-]*", spoken(script_text))
+    if not tokens:
         return None
-    tokens = re.findall(r"[A-Za-z][A-Za-z'-]*", script_text)
     lowercase_seen = {t for t in tokens if t[0].islower()}
     names: list[str] = []
     for token in tokens:
         bare = token.removesuffix("'s")
+        # a word all in capitals is emphasis for the voice, not a name
+        if bare.isupper() and len(bare) > 1:
+            continue
         if bare[0].isupper() and len(bare) > 2 and bare.lower() not in lowercase_seen and bare not in names:
             names.append(bare)
     return " ".join(names[:limit]) or None
+
+
+# a stretch of this many words made of one short phrase said over and over
+LOOP_MIN_WORDS = 12
+LOOP_MAX_PHRASE = 12
+LOOP_MARGIN = 1.0  # seconds re-transcribed on either side of a stuck stretch
+
+
+def _stuck_stretches(words: list[Word]) -> list[tuple[int, int]]:
+    """Where the recogniser got stuck: the same phrase of up to LOOP_MAX_PHRASE
+    words at least three times in a row, LOOP_MIN_WORDS words or more in all. It
+    does this now and then on long audio, and with hotwords what it repeats is the
+    hotword list itself - for minutes, over real narration. Returns [start, end)
+    word-index ranges, merged."""
+    tokens = [re.sub(r"[^\w']+", "", w.text.lower()) for w in words]
+    found: list[tuple[int, int]] = []
+    for phrase in range(1, LOOP_MAX_PHRASE + 1):
+        i = 0
+        while i + phrase < len(tokens):
+            run = 0
+            while i + run + phrase < len(tokens) and tokens[i + run] == tokens[i + run + phrase]:
+                run += 1
+            length = run + phrase
+            if length >= max(LOOP_MIN_WORDS, 3 * phrase):
+                found.append((i, i + length))
+                i += length
+            else:
+                i += 1
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(found):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _heard(segments, report: Report | None = None, total: float = 0.0) -> list[Word]:
+    words: list[Word] = []
+    for segment in segments:
+        for w in segment.words or []:
+            text = w.word.strip()
+            if text:
+                words.append(Word(text=text, start=round(w.start, 3), end=round(w.end, 3)))
+        if report:
+            report(f"transcribing: {segment.end:.0f}s / {total:.0f}s")
+    return words
+
+
+def _redo_stuck(model, audio_path, words: list[Word], report: Report) -> list[Word]:
+    """Transcribes the stuck stretches again, on their own and without hotwords or
+    the text before them - what the loop feeds on - and puts the result in place."""
+    stretches = _stuck_stretches(words)
+    for n, (first, last) in enumerate(reversed(stretches)):  # from the end: indexes before stay valid
+        start = max(0.0, words[first].start - LOOP_MARGIN)
+        end = words[last - 1].end + LOOP_MARGIN
+        report(f"transcribing again where recognition got stuck ({n + 1}/{len(stretches)})")
+        segments, _ = model.transcribe(
+            str(audio_path), word_timestamps=True, clip_timestamps=[start, end], condition_on_previous_text=False
+        )
+        again = [w for w in _heard(segments) if start <= w.start < end]
+        if not again or _stuck_stretches(again):
+            logger.warning("transcript still stuck at %.0f-%.0fs", start, end)
+            if not again:
+                continue
+        words = [w for w in words if w.end <= start] + again + [w for w in words if w.start >= end]
+    return words
 
 
 def run_transcribe(project_id: str, report: Report) -> None:
@@ -55,16 +128,10 @@ def run_transcribe(project_id: str, report: Report) -> None:
         hotwords=_hotwords_from_script(project.script_text),
     )
 
-    words: list[Word] = []
-    for segment in segments:
-        for w in segment.words or []:
-            text = w.word.strip()
-            if text:
-                words.append(Word(text=text, start=round(w.start, 3), end=round(w.end, 3)))
-        report(f"transcribing: {segment.end:.0f}s / {info.duration:.0f}s")
-
+    words = _heard(segments, report, info.duration)
     if not words:
         raise RuntimeError("No speech found in the audio")
+    words = _redo_stuck(model, audio_path, words, report)
 
     store.save_words(project_id, words)
 
@@ -184,7 +251,7 @@ def run_beats(project_id: str, report: Report) -> None:
         "Every unit must belong to exactly one beat, in order, with no gaps and no overlaps.\n\n"
         + (
             "The original script, for correct spelling of names (the units below come from speech "
-            f"recognition and may misspell them):\n{project.script_text}\n\n"
+            f"recognition and may misspell them):\n{spoken(project.script_text)}\n\n"
             if project.script_text
             else ""
         )
@@ -289,10 +356,11 @@ QUERIES_SCHEMA = {
                                 "moment": {
                                     "type": "string",
                                     "description": (
-                                        "Empty for most shots. Only when the narration at this shot names one "
-                                        "particular event that happens in one place in the shows (e.g. 'Iroh's "
-                                        "army breaks through the outer wall of Ba Sing Se'): that event, in one "
-                                        "sentence with names."
+                                        "When the narration at this shot tells of a particular event of the "
+                                        "story - something that happens at one point in the shows, which a viewer "
+                                        "could point to in an episode (e.g. 'Iroh's army breaks through the outer "
+                                        "wall of Ba Sing Se'): that event, in one sentence with names. Empty when "
+                                        "the shot only illustrates a general statement."
                                     ),
                                 },
                                 "episodes": {
@@ -326,10 +394,6 @@ def _slot_count(beat: Beat, max_clip_seconds: float) -> int:
     return max(1, math.ceil((beat.end - beat.start) / max_clip_seconds - 1e-6))
 
 
-# a comic page gets at least this long on screen, however many pages a beat walks through
-MIN_PAGE_SECONDS = 3.0
-
-
 def _make_slots(beat: Beat, max_clip_seconds: float) -> list[Slot]:
     return _even_slots(beat, _slot_count(beat, max_clip_seconds))
 
@@ -360,12 +424,15 @@ def _episode_list(db, project: store.Project, in_library: set[str]) -> tuple[str
 
 
 def _has_indexed_pages(db, title: str) -> bool:
-    from sqlalchemy import select
+    from sqlalchemy import or_, select
 
     from app.db.models import Scene
 
+    # indexed by its caption, or by the fan wiki's account of the page
     return db.execute(
-        select(Scene.id).where(Scene.show_title == title, Scene.embedded_at.isnot(None)).limit(1)
+        select(Scene.id)
+        .where(Scene.show_title == title, or_(Scene.embedded_at.isnot(None), Scene.wiki_description.isnot(None)))
+        .limit(1)
     ).first() is not None
 
 
@@ -423,7 +490,8 @@ def _requery(project: store.Project, failed: list[tuple[Beat, Slot]], shows: lis
 
 
 def _comic_cast(db, comics: list[str], most: int = 12) -> dict[str, list[str]]:
-    """Who appears in each comic, most pages first, from the described pages' tags -
+    """Who appears in each comic, most pages first, from the pages' tags (a caption's,
+    or the speakers the fan wiki's transcript gives a page not captioned yet) -
     so the shot-queries call can tell a comic's own characters (often from comics too
     new for the model to know) from the shows'. Names on a single page are left out."""
     from collections import Counter
@@ -435,7 +503,7 @@ def _comic_cast(db, comics: list[str], most: int = 12) -> dict[str, list[str]]:
     cast: dict[str, list[str]] = {}
     for title in comics:
         counts: Counter[str] = Counter()
-        for tags in db.execute(select(Scene.character_tags).where(Scene.show_title == title, Scene.caption_status == "done")).scalars():
+        for tags in db.execute(select(Scene.character_tags).where(Scene.show_title == title)).scalars():
             counts.update(tags or [])
         cast[title] = [name for name, n in counts.most_common(most) if n > 1]
     return cast
@@ -499,8 +567,7 @@ def run_queries(project_id: str, report: Report) -> None:
         prompt = (
             f"A video essay is being illustrated with clips cut from {shows}. Below is its narration, split "
             "into numbered beats. For every beat, describe the shots from the show that should be on screen "
-            "while it is spoken - exactly as many shots as 'shots needed' says (a beat told from a comic is "
-            "the exception, see below).\n\n"
+            "while it is spoken - exactly as many shots as 'shots needed' says.\n\n"
             "Each shot is found by searching an index of the show's scenes, so describe footage that really "
             "exists in the show, as concretely as you can: a specific moment, character, place or action. "
             "When the narration is abstract or general, choose concrete imagery from the show that illustrates "
@@ -527,11 +594,8 @@ def run_queries(project_id: str, report: Report) -> None:
                 "such a shot text_query describes what happens on the page, with names, and visual_query is not "
                 "used. Do not send a shot to a comic merely because the comic also touches on the subject; "
                 "otherwise the shows come first.\n"
-                "A comic's shots are its pages, and they are not bound by 'shots needed' or any length: when a "
-                "whole beat goes to a comic, give one shot per page the narration there walks through - a single "
-                "page when it dwells on one moment, several when it moves through a sequence of events, in the "
-                "order they happen. The beat's time is shared between them, however long that makes each page "
-                f"(but no less than {MIN_PAGE_SECONDS:.0f}s a page).\n\n"
+                "How many pages of a comic are shown over a beat, and for how long each, is decided later from "
+                "the comic itself - for a beat told from a comic just send all its shots to that comic.\n\n"
                 if comics
                 else ""
             )
@@ -544,13 +608,18 @@ def run_queries(project_id: str, report: Report) -> None:
                 else ""
             )
             + (
-                "Most shots only illustrate what the narration says - any fitting clip will do. Some are about "
-                "one particular event the narration explicitly names, which happens in one place in the shows "
-                "(a battle, a duel, a confession, a death, a specific scene): for those also give moment - the "
-                "event, in one sentence - and the 1-3 episodes it happens in, by number from the list below. "
-                "The episodes are then read to find the exact scene. Only explicit events: a general statement, "
-                "a habit, a mood or a character's nature is not a moment, and neither is a shot for a comic or "
-                "a photo.\n\nEpisodes:\n" + episode_list + "\n\n"
+                "Shots are of two kinds. Where the narration tells of a particular event of the story - "
+                "something that happens at one point in the shows, which a viewer could point to in an episode: "
+                "a battle, a duel, a conversation, a line someone says, a decision, an arrival, a death - the "
+                "shot must show that very event, and any other clip there looks random. For every such shot also "
+                "give moment - the event, in one sentence with names - and the 1-3 episodes it happens in, by "
+                "number from the list below; the episodes are then read to find the exact scene. Go through the "
+                "narration event by event: when a sentence recounts several events in a row, each shot under it "
+                "gets its own event as its moment. When you are not sure whether the narration means one event, "
+                "give the moment - one that is not found is simply searched the ordinary way. The other kind "
+                "of shot only illustrates - a general statement, a habit, a mood, a character's nature, a stretch "
+                "of time - and any fitting clip will do: no moment for those, nor for a shot for a comic or a "
+                "photo.\n\nEpisodes:\n" + episode_list + "\n\n"
                 if episode_list
                 else ""
             )
@@ -578,13 +647,6 @@ def run_queries(project_id: str, report: Report) -> None:
             if not window_start <= index < window_start + len(window) or not entry["shots"]:
                 continue
             beat = beats[index]
-            pages = [shot for shot in entry["shots"] if any(title in comics for title in shot.get("shows", []))]
-            if pages and len(pages) == len(entry["shots"]) and not any(slot.locked for slot in beat.slots):
-                # a beat told from a comic: as many pages as the narration walks through,
-                # sharing the beat evenly - not held to the clip-length limit
-                count = max(1, min(len(pages), int((beat.end - beat.start) // MIN_PAGE_SECONDS)))
-                if count != len(beat.slots):
-                    beat.slots = _even_slots(beat, count)
             for i, slot in enumerate(beat.slots):
                 if slot.locked:
                     continue
@@ -664,24 +726,49 @@ def run_select(project_id: str, report: Report) -> None:
             for candidate in moments_for.values():
                 usage.add(candidate)
 
-        # Shots sent to a comic: Claude reads the comic's pages and picks the page for
-        # each (one call per comic), rather than trusting the vector search alone.
+        # Shots sent to a comic: Claude reads the comic's pages and picks them (one call
+        # per comic), rather than trusting the vector search alone. For a beat told
+        # wholly from the comic it also decides how many pages there are and on which
+        # word of the narration each comes on; the beat's slots are rebuilt to that.
         pages_for: dict[int, Candidate | None] = {}  # id(slot) -> picked page
-        by_comic: dict[str, list[tuple[Beat, Slot]]] = {}
+        paged: set[int] = set()  # id(beat) of beats whose slots follow the pages
+        words = store.load_words(project_id)
+        whole: dict[str, list[Beat]] = {}
+        single: dict[str, list[tuple[Beat, Slot]]] = {}
         for beat in project.beats:
+            titles = {slot.shows[0] if len(slot.shows) == 1 and slot.shows[0] in ctx.comics else None for slot in beat.slots}
+            if beat.slots and len(titles) == 1 and None not in titles and not any(slot.locked for slot in beat.slots):
+                whole.setdefault(titles.pop(), []).append(beat)
+                continue
             for slot in beat.slots:
                 if not (slot.locked and slot.selected is not None) and len(slot.shows) == 1 and slot.shows[0] in ctx.comics:
-                    by_comic.setdefault(slot.shows[0], []).append((beat, slot))
-        for title, shots in by_comic.items():
-            report(f"picking pages of {title} for {len(shots)} shot{'s' if len(shots) > 1 else ''}")
+                    single.setdefault(slot.shows[0], []).append((beat, slot))
+        for title in dict.fromkeys([*whole, *single]):
+            beats_of, shots = whole.get(title, []), single.get(title, [])
+            report(f"picking pages of {title}")
             try:
-                picked, cost = pick_pages(db, title, shots, store.project_dir(project_id))
+                timed, picked, cost = pick_pages(
+                    db, title, [(beat, words[beat.word_start : beat.word_end + 1]) for beat in beats_of], shots,
+                    store.project_dir(project_id),
+                )
             except Exception as exc:  # the vector search's pages are still there
                 logger.warning("picking pages of %s: %s", title, exc)
                 continue
             llm_cost += cost
             for i, (_, slot) in enumerate(shots):
                 pages_for[id(slot)] = picked.get(i)
+            for i, beat in enumerate(beats_of):
+                if timed.get(i) is None:
+                    for slot in beat.slots:  # nothing in the comic: new queries for the shows, below
+                        pages_for[id(slot)] = None
+                    continue
+                note = beat.slots[0]
+                beat.slots = []
+                for page, page_start, page_end in timed[i]:
+                    slot = Slot(start=page_start, end=page_end, text_query=note.text_query, shows=[title])
+                    pages_for[id(slot)] = page
+                    beat.slots.append(slot)
+                paged.add(id(beat))
         # the same page for two shots in a row of one beat: one shot, the page shown longer
         for beat in project.beats:
             merged: list[Slot] = []
@@ -703,7 +790,11 @@ def run_select(project_id: str, report: Report) -> None:
             limit = project.settings.max_clip_seconds
             # the number of clips is decided when shot queries are written; if the
             # limit changed since, leave the beat as it is until they are re-run
-            flexible = not any(slot.locked for slot in beat.slots) and len(beat.slots) == _slot_count(beat, limit)
+            flexible = (
+                not any(slot.locked for slot in beat.slots)
+                and len(beat.slots) == _slot_count(beat, limit)
+                and id(beat) not in paged  # its slots are timed to the comic's pages
+            )
             if flexible and beat.slots:
                 even = _make_slots(beat, limit)
                 for slot, fresh in zip(beat.slots, even):

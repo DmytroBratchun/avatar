@@ -81,6 +81,7 @@ export function SlotEditor({
   slotIndex,
   slot,
   projectShows,
+  projectComics = [],
   disabled,
   onChange,
 }: {
@@ -89,6 +90,8 @@ export function SlotEditor({
   slotIndex: number;
   slot: EditorSlot;
   projectShows: string[];
+  // comic series of the project's universe: their pages can be picked by hand too
+  projectComics?: string[];
   disabled: boolean;
   onChange: (project: EditorProject) => void;
 }) {
@@ -261,7 +264,7 @@ export function SlotEditor({
         {error && <p className="error-text">{error.message}</p>}
         {picking && (
           <ScenePicker
-            shows={projectShows}
+            shows={[...projectShows, ...projectComics]}
             clipSeconds={slot.end - slot.start}
             busy={manualMutation.isPending}
             error={manualMutation.error ? (manualMutation.error as Error).message : null}
