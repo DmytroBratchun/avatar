@@ -61,7 +61,9 @@ BANK_LINE_CHARS = 320  # how much of a banked quote is shown to the model
 # before the outer run is taken for a chance match elsewhere in the fragment
 MATCH_GAP_WORDS = 3
 FRAGMENT_PADDING = 2.0  # seconds of audio either side of the lines, re-transcribed to find the exact words
-LEAD_IN, LEAD_OUT = 0.2, 0.3  # breathing room kept around the spoken words
+# breathing room kept around the spoken words: a little before the first, more after
+# the last - the scene's sound is let die away there (see render._soundtrack)
+LEAD_IN, LEAD_OUT = 0.2, 0.7
 SENTENCE_END = (".", "!", "?", "…", '."', '!"', '?"')
 
 WANTED_SCHEMA = {
@@ -529,9 +531,10 @@ def _hear(file_path: str, start: float, end: float, cache_dir: Path) -> tuple[fl
     return fragment_start, heard
 
 
-def _locate(heard: list, offset: float, text: str, after: float = 0.0) -> tuple[float, float] | None:
-    """Where the words of `text` start and stop, in episode time, among the words
-    heard at or after `after` - None when they can't be found again."""
+def _locate(heard: list, offset: float, text: str, after: float = 0.0) -> tuple[float, float, float] | None:
+    """Where the clip for the words of `text` starts and stops, and where its last
+    word stops, in episode time, among the words heard at or after `after` - None
+    when they can't be found again."""
     skip = next((i for i, w in enumerate(heard) if offset + w.start >= after), len(heard))
     wanted_tokens = _tokens(text)
     heard_tokens = [(_tokens(w.word) or [""])[0] for w in heard[skip:]]
@@ -561,8 +564,8 @@ def _locate(heard: list, offset: float, text: str, after: float = 0.0) -> tuple[
     if first > 0:
         start = max(start, min(heard[first - 1].end, heard[first].start - 0.05))
     if last + 1 < len(heard):
-        end = min(end, max(heard[last + 1].start, heard[last].end + 0.1))
-    return max(0.0, offset + start), offset + end
+        end = min(end, max(heard[last + 1].start - 0.05, heard[last].end + 0.1))
+    return max(0.0, offset + start), offset + end, offset + heard[last].end
 
 
 def _cut(
@@ -580,13 +583,36 @@ def _cut(
         if span is None:
             if fallback is None:
                 continue
-            span = (max(0.0, fallback[0] - LEAD_IN), fallback[1] + LEAD_OUT)
+            span = (max(0.0, fallback[0] - LEAD_IN), fallback[1] + LEAD_OUT, None)
+        speech_end = round(span[2], 3) if span[2] is not None else None
         if parts and span[0] <= parts[-1].end + JOIN_GAP:
             parts[-1].end = max(parts[-1].end, round(span[1], 3))
             parts[-1].text += " " + text
+            parts[-1].speech_end = speech_end
         else:
-            parts.append(QuotePart(start=round(span[0], 3), end=round(span[1], 3), text=text))
+            parts.append(QuotePart(start=round(span[0], 3), end=round(span[1], 3), text=text, speech_end=speech_end))
     return parts
+
+
+def retail(quote: Quote, cache_dir: Path) -> bool:
+    """Gives a quote cut before the longer tail its new end: its last piece is heard
+    again, and the clip ends LEAD_OUT after the last word, or just before whoever
+    speaks next. It never gets shorter. Returns whether anything changed."""
+    start, end = quote.spans()[-1]
+    text = quote.parts[-1].text if quote.parts else quote.text
+    offset, heard = _hear(quote.file_path, start, end, cache_dir)
+    span = _locate(heard, offset, text)
+    if span is None or abs(span[0] - start) > 1.0:
+        return False  # not the words it was cut by - set by hand, or not heard again
+    new_end = round(max(end, span[1]), 3)
+    speech_end = round(span[2], 3)
+    if new_end == end and quote.speech_end == speech_end:
+        return False
+    quote.speech_end = speech_end
+    if quote.parts:
+        quote.parts[-1].end, quote.parts[-1].speech_end = new_end, speech_end
+    quote.clip_end = new_end
+    return True
 
 
 def find_quotes(db: Session, project: Project, words: list[Word], cwd: Path, report) -> float:
@@ -638,6 +664,7 @@ def find_quotes(db: Session, project: Project, words: list[Word], cwd: Path, rep
                 clip_start=parts[0].start,
                 clip_end=parts[-1].end,
                 parts=parts if len(parts) > 1 else [],
+                speech_end=parts[-1].speech_end,
                 text=" … ".join(part.text for part in parts),
                 speaker=speaker,
                 reason=reason,

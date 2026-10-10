@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from app.editor import jobs, store, voice_text, voiceover
+from app.editor import jobs, music_library, store, voice_text, voiceover
 from app.editor.store import Project, Word
 from app.services.lumean import Lumean, LumeanError
 from app.services.runtime_settings import (
@@ -67,6 +67,7 @@ class ProjectUpdateIn(BaseModel):
     quote_cuts: bool | None = None
     music_enabled: bool | None = None
     music_level: float | None = None
+    music_library_only: bool | None = None
     comic_width: float | None = None
     sound_effects: bool | None = None
     sfx_volume: float | None = None
@@ -179,6 +180,8 @@ def update_project(project_id: str, payload: ProjectUpdateIn) -> Project:
             p.settings.music_enabled = data["music_enabled"]
         if data.get("music_level") is not None:
             p.settings.music_level = min(40.0, max(6.0, data["music_level"]))
+        if data.get("music_library_only") is not None:
+            p.settings.music_library_only = data["music_library_only"]
         if data.get("comic_width") is not None:
             p.settings.comic_width = min(1.0, max(0.3, data["comic_width"]))
         if data.get("sound_effects") is not None:
@@ -514,7 +517,15 @@ def recompose_music_block(project_id: str, block_id: str) -> Project:
     _music_block(_idle(project_id), block_id)
     if not current_lumean_api_key():
         raise HTTPException(400, "Add the Lumean API key in Settings first")
-    store.update_project(project_id, lambda p: setattr(_music_block(p, block_id), "tracks", []))
+    def drop(p: Project) -> None:
+        block = _music_block(p, block_id)
+        # "again" means other music: what it had is not taken back from the library
+        folder = store.project_dir(project_id) / "music"
+        had = [music_library.library_id(t, folder) for t in block.tracks]
+        block.avoid += [i for i in dict.fromkeys(had) if i and i not in block.avoid]
+        block.tracks = []
+
+    store.update_project(project_id, drop)
     return jobs.start(project_id, "music")
 
 
@@ -528,8 +539,20 @@ def update_music_track(project_id: str, block_id: str, track_id: str, payload: M
         for track in _music_block(p, block_id).tracks:
             if track.id == track_id:
                 track.enabled = payload.enabled
+                # a track left out of one video is not offered to the next
+                music_library.set_rejected(
+                    music_library.library_id(track, store.project_dir(project_id) / "music"), not payload.enabled
+                )
 
     return store.update_project(project_id, apply)
+
+
+@router.get("/projects/{project_id}/music/library")
+def music_library_usage(project_id: str) -> dict:
+    """Which of the project's tracks came from the music library, and which other
+    videos each of its tracks plays in: {"enabled", "tracks": {track id: {...}}}."""
+    project = _load(project_id)
+    return {"enabled": music_library.root() is not None, "tracks": music_library.usage(project)}
 
 
 @router.post("/projects/{project_id}/music/replan", response_model=Project)
@@ -970,11 +993,14 @@ def update_quote(project_id: str, quote_id: str, payload: QuoteUpdateIn) -> Proj
         if retimed:
             quote.clip_start, quote.clip_end = round(new_start, 3), round(new_end, 3)
             quote.parts = []
+            if quote.speech_end is not None and not quote.clip_start < quote.speech_end < quote.clip_end - 0.1:
+                quote.speech_end = None
             if new_text:
                 quote.text = new_text
         if payload.drop_part is not None and payload.drop_part < len(quote.parts):
             left = [part for i, part in enumerate(quote.parts) if i != payload.drop_part]
             quote.clip_start, quote.clip_end = left[0].start, left[-1].end
+            quote.speech_end = left[-1].speech_end
             quote.text = " … ".join(part.text for part in left)
             quote.parts = left if len(left) > 1 else []
         if payload.status is not None:

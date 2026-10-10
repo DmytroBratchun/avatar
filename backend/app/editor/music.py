@@ -13,6 +13,9 @@ the same loudness, a fixed amount below the narration's.
 Blocks and their tracks live in project.json (Project.music), the audio files in
 <project>/music/. The mixed track is put together at render time (build_track) and
 laid under the narration only - a quote plays with the show's own sound.
+
+Every composed track is also filed in the music library (music_library.py), and
+a block looks there before it orders anything.
 """
 
 import hashlib
@@ -27,7 +30,7 @@ from pathlib import Path
 
 import numpy as np
 
-from app.editor import store
+from app.editor import music_library, store
 from app.editor.llm import run_claude_json
 from app.editor.store import MusicBlock, MusicTrack, Project, project_shows, project_universe
 from app.services.lumean import Lumean, LumeanError
@@ -339,23 +342,49 @@ def _save(project_id: str, blocks: list[MusicBlock], cost: float = 0.0) -> None:
     store.update_project(project_id, apply)
 
 
-def _collect(client: Lumean, order: dict, block: MusicBlock, out: Path) -> int:
-    """Downloads an order's tracks into the block and measures them. Returns how many."""
+def _from_library(project: Project, blocks: list[MusicBlock], out: Path, only: bool) -> int:
+    """Fills blocks from the music library: tracks made from a prompt almost the same
+    as the block's, or - with the library as the only source - the closest there
+    are. A track plays once in a video. Returns how many were taken."""
+    if music_library.root() is None:
+        return 0
+    universe = store.project_universe(project).id or "other"
+    at_least = music_library.LIBRARY_ONLY_SIMILARITY if only else music_library.REUSE_SIMILARITY
+    in_video = {music_library.library_id(t, out) for b in blocks for t in b.tracks}
+    taken = 0
+    for block in blocks:
+        if covered(block) >= needed(block):
+            continue
+        for _, entry in music_library.similar(universe, block.prompt, at_least):
+            if covered(block) >= needed(block):
+                break
+            if entry.id in in_video or entry.id in block.avoid:
+                continue
+            block.tracks.append(music_library.take(project, block, entry, out))
+            in_video.add(entry.id)
+            taken += 1
+    return taken
+
+
+def _collect(client: Lumean, order: dict, block: MusicBlock, out: Path, project: Project) -> int:
+    """Downloads an order's tracks into the block, measures them and files them in
+    the music library. Returns how many."""
     files = (order.get("result") or {}).get("files") or []
     added = 0
     for path in files:
-        name = f"{block.id}_{order['id'][:8]}_{added + 1}{Path(path).suffix or '.mp3'}"
+        # the start of an order's id is a time: orders placed together share it, so the end goes in too
+        name = f"{block.id}_{order['id'][:8]}{order['id'][-6:]}_{added + 1}{Path(path).suffix or '.mp3'}"
         try:
             client.download(path, out / name)
         except LumeanError:
             continue
         start, end, duration = usable_range(out / name)
-        block.tracks.append(
-            MusicTrack(
-                id=f"track_{uuid.uuid4().hex[:8]}", file=name, order_id=order["id"], duration=duration,
-                start=start, end=end, loudness=loudness(out / name, start, end - start),
-            )
+        track = MusicTrack(
+            id=f"track_{uuid.uuid4().hex[:8]}", file=name, order_id=order["id"], duration=duration,
+            start=start, end=end, loudness=loudness(out / name, start, end - start),
         )
+        track.library_id = music_library.add(project, block, track, out / name) or ""
+        block.tracks.append(track)
         added += 1
     return added
 
@@ -378,6 +407,20 @@ def compose(project_id: str, report) -> None:
         _save(project_id, blocks, cost)
     else:
         blocks = project.music
+
+    library_only = project.settings.music_library_only
+    report("looking in the music library")
+    if _from_library(project, blocks, out, library_only):
+        _save(project_id, blocks)
+    if library_only:
+        music_library.forget_project(project_id, {music_library.library_id(t, out) for b in blocks for t in b.tracks})
+        short = [b for b in blocks if covered(b) < needed(b)]
+        if short:
+            names = ", ".join(f"{b.id[-2:]} ({b.mood})" for b in short)
+            raise RuntimeError(
+                f"The music library has not enough for block {names} - untick 'only from the library' to compose the rest"
+            )
+        return
 
     client = Lumean()
     in_flight: dict[str, str] = {}  # block id -> order id
@@ -414,10 +457,11 @@ def compose(project_id: str, report) -> None:
                 continue
             del in_flight[block_id]
             block = next(b for b in blocks if b.id == block_id)
-            if _collect(client, order, block, out):
+            if _collect(client, order, block, out, project):
                 _save(project_id, blocks)
 
     unfilled = [b for b in blocks if covered(b) < needed(b)]
+    music_library.forget_project(project_id, {music_library.library_id(t, out) for b in blocks for t in b.tracks})
     # files no block uses any more: tracks of earlier plans
     kept = {t.file for b in blocks for t in b.tracks}
     for stale in out.iterdir():

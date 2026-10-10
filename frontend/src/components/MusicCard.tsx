@@ -1,7 +1,7 @@
-import { useMutation } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api/client";
-import type { EditorMusicBlock, EditorProject } from "../api/client";
+import type { EditorMusicBlock, EditorProject, MusicLibraryUsage } from "../api/client";
 
 // seconds two neighbouring tracks play together (the backend's OVERLAP)
 const OVERLAP = 3;
@@ -21,12 +21,14 @@ function BlockRow({
   block,
   number,
   disabled,
+  library,
   onChange,
 }: {
   project: EditorProject;
   block: EditorMusicBlock;
   number: number;
   disabled: boolean;
+  library: MusicLibraryUsage["tracks"];
   onChange: (project: EditorProject) => void;
 }) {
   const [prompt, setPrompt] = useState(block.prompt);
@@ -93,6 +95,17 @@ function BlockRow({
           <span className="hint" style={{ margin: 0 }} title="The part that is played: generated tracks fade out towards the end, so the next one comes in before that.">
             plays {track.start.toFixed(1)}-{track.end.toFixed(1)}s of {track.duration.toFixed(0)}s
           </span>
+          {library[track.id] && (library[track.id].from_library || library[track.id].used_in.length > 0) && (
+            <span
+              className="badge"
+              title={
+                (library[track.id].from_library ? "Taken from the music library." : "Composed for this video.") +
+                (library[track.id].used_in.length > 0 ? ` Also plays in: ${library[track.id].used_in.join(", ")}.` : " In no other video.")
+              }
+            >
+              {library[track.id].from_library ? "library" : "reused"}
+            </span>
+          )}
         </div>
       ))}
       {error && <p className="error-text">{error.message}</p>}
@@ -117,10 +130,17 @@ export default function MusicCard({
 }) {
   const [level, setLevel] = useState(project.settings.music_level);
   const settings = useMutation({
-    mutationFn: (payload: { music_enabled?: boolean; music_level?: number }) => api.updateEditorProject(project.id, payload),
+    mutationFn: (payload: { music_enabled?: boolean; music_level?: number; music_library_only?: boolean }) =>
+      api.updateEditorProject(project.id, payload),
     onSuccess: onChange,
   });
   const replan = useMutation({ mutationFn: () => api.replanMusic(project.id), onSuccess: onChange });
+  // which tracks are from the library and where else they play - asked again when the music changes
+  const { data: library } = useQuery({
+    queryKey: ["editorMusicLibrary", project.id, project.music.map((b) => b.tracks.map((t) => t.id).join()).join("|")],
+    queryFn: () => api.getMusicLibraryUsage(project.id),
+    placeholderData: keepPreviousData,
+  });
   const busy = disabled || replan.isPending;
   const unfilled = project.music.filter((b) => covered(b) < b.end - b.start + OVERLAP).length;
   const error = (settings.error ?? replan.error) as Error | null;
@@ -152,6 +172,21 @@ export default function MusicCard({
           />
           Music in the video
         </label>
+        {library?.enabled && (
+          <label
+            style={{ display: "flex", alignItems: "center", gap: "0.4rem", margin: 0, cursor: "pointer" }}
+            title="Composes nothing new: every block is filled with the closest tracks already in the music library. Without it a block takes a library track only when one was made from almost the same prompt, and the rest is composed."
+          >
+            <input
+              type="checkbox"
+              style={{ width: "auto" }}
+              checked={project.settings.music_library_only}
+              disabled={busy}
+              onChange={(e) => settings.mutate({ music_library_only: e.target.checked })}
+            />
+            Only from the library
+          </label>
+        )}
         <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", margin: 0 }} title="How much quieter than the narrator's voice the music plays, in loudness units. Higher is quieter.">
           Quieter than the voice by {level.toFixed(0)}
           <input
@@ -181,7 +216,7 @@ export default function MusicCard({
       )}
 
       {project.music.map((block, i) => (
-        <BlockRow key={`${block.id}-${block.prompt}`} project={project} block={block} number={i + 1} disabled={busy} onChange={onChange} />
+        <BlockRow key={`${block.id}-${block.prompt}`} project={project} block={block} number={i + 1} disabled={busy} library={library?.tracks ?? {}} onChange={onChange} />
       ))}
       {error && <p className="error-text">{error.message}</p>}
     </div>

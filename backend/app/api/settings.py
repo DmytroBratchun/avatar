@@ -14,6 +14,9 @@ class SettingsOut(BaseModel):
     anthropic_api_key: str
     anthropic_api_key_from_env: bool
     lumean_api_key: str
+    lumean_api_key_from_env: bool
+    openai_api_key: str
+    openai_api_key_from_env: bool
 
 
 class SettingsUpdateIn(BaseModel):
@@ -21,6 +24,7 @@ class SettingsUpdateIn(BaseModel):
     caption_model: str | None = None
     anthropic_api_key: str | None = None
     lumean_api_key: str | None = None
+    openai_api_key: str | None = None
 
 
 @router.get("", response_model=SettingsOut)
@@ -35,5 +39,6 @@ def write_settings(payload: SettingsUpdateIn) -> dict:
         caption_model=payload.caption_model,
         anthropic_api_key=payload.anthropic_api_key,
         lumean_api_key=payload.lumean_api_key,
+        openai_api_key=payload.openai_api_key,
     )
     return get_effective_settings()

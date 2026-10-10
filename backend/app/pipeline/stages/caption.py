@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -332,10 +333,20 @@ def caption_scene_via_api(
 # --- provider: headless Claude Code CLI (billed to your Claude subscription, not a metered key) ---
 
 
+def _outside_repo() -> str:
+    """An empty folder of its own for headless Claude calls to run in."""
+    folder = Path(tempfile.gettempdir()) / "avatar-captions"
+    folder.mkdir(exist_ok=True)
+    return str(folder)
+
+
 def caption_scene_via_claude_code(
     source: Source, scene: Scene, transcript_text: str, tag_hint: str, schema: dict
 ) -> tuple[dict, float | None]:
-    image_list = "\n".join(f"- {p}" for p in scene.keyframe_paths)
+    # absolute: the call runs outside the repo (see cwd below), where a path relative
+    # to the backend folder would not be found
+    images = [(BACKEND_DIR / p).resolve() for p in scene.keyframe_paths]
+    image_list = "\n".join(f"- {p}" for p in images)
     prompt = (
         f"{_episode_primer(source)}\n\n"
         + (
@@ -361,8 +372,13 @@ def caption_scene_via_claude_code(
             "--tools", "Read",
             "--allowedTools", "Read",
             "--no-session-persistence",
+            # the images are outside the folder the call runs in
+            *[arg for folder in dict.fromkeys(p.parent for p in images) for arg in ("--add-dir", str(folder))],
         ],
-        cwd=str(BACKEND_DIR),
+        # Away from the repo: started inside it, every call loads the repo's CLAUDE.md
+        # as context - some 14k tokens written to the prompt cache per scene, about
+        # half of what a caption costs - and it has nothing to do with the picture.
+        cwd=_outside_repo(),
         env=env,
         capture_output=True,
         text=True,

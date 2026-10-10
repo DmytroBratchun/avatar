@@ -38,6 +38,9 @@ def get_effective_settings() -> dict:
         "anthropic_api_key": raw.get("anthropic_api_key") or settings.anthropic_api_key,
         "anthropic_api_key_from_env": not raw.get("anthropic_api_key") and bool(settings.anthropic_api_key),
         "lumean_api_key": raw.get("lumean_api_key") or "",
+        "lumean_api_key_from_env": not raw.get("lumean_api_key") and bool(_environment("LUMEAN_KEY")),
+        "openai_api_key": raw.get("openai_api_key") or "",
+        "openai_api_key_from_env": not raw.get("openai_api_key") and bool(_environment("OPENAI_API_KEY")),
     }
 
 
@@ -46,6 +49,7 @@ def update_settings(
     caption_model: str | None = None,
     anthropic_api_key: str | None = None,
     lumean_api_key: str | None = None,
+    openai_api_key: str | None = None,
 ) -> None:
     """None field = leave unchanged. Empty string = clear the override (fall back to .env)."""
     with _lock:
@@ -55,6 +59,7 @@ def update_settings(
             ("caption_model", caption_model),
             ("anthropic_api_key", anthropic_api_key),
             ("lumean_api_key", lumean_api_key),
+            ("openai_api_key", openai_api_key),
         ):
             if value is None:
                 continue
@@ -109,6 +114,13 @@ def set_editor_default_look(look: dict) -> None:
         SETTINGS_PATH.write_text(json.dumps(raw, indent=2), encoding="utf-8")
 
 
+def editor_music_library() -> str | None:
+    """Folder of the music library - every composed track with its prompt, kept in
+    the media folder for later videos to reuse ("music_library" in settings.json).
+    Without it nothing is kept or reused."""
+    return _read_raw().get("music_library") or None
+
+
 def editor_default_voice() -> dict:
     """The voice and its settings new video projects start with - whatever the user
     last saved as default from a project's Voice tab."""
@@ -142,6 +154,12 @@ def current_lumean_api_key() -> str:
     """Key for the Lumean API, which voices the editor's narration (app/services/lumean.py):
     the one saved in settings, else the LUMEAN_KEY environment variable."""
     return (_read_raw().get("lumean_api_key") or "").strip() or _environment("LUMEAN_KEY")
+
+
+def current_openai_api_key() -> str:
+    """Key for the OpenAI API (planned: generating characters on a clear background
+    as elements of a video): the one saved in settings, else OPENAI_API_KEY."""
+    return (_read_raw().get("openai_api_key") or "").strip() or _environment("OPENAI_API_KEY")
 
 
 def _environment(name: str) -> str:

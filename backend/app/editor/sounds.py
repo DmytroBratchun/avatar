@@ -187,18 +187,30 @@ def build_narration(project: Project, folder: Path) -> Path | None:
     if target.exists():
         return target
     target.parent.mkdir(exist_ok=True)
+    # Each effect file is opened once and split as many times as it plays, and the
+    # graph goes in a file: a video of 140 comic pages would otherwise need a command
+    # line past Windows' 32k-character limit.
+    files = list(dict.fromkeys(path for _, path in placed))
     inputs = ["-i", str(narration)]
-    graph = ["[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[n]"]
-    for i, (at, path) in enumerate(placed, start=1):
+    for path in files:
         inputs += ["-i", str(path)]
-        delay = int(round(at * 1000))
-        graph.append(f"[{i}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                     f"volume={-abs(project.settings.sfx_volume):.1f}dB,adelay={delay}:all=1[e{i}]")
-    graph.append("[n]" + "".join(f"[e{i}]" for i in range(1, len(placed) + 1))
+    graph = ["[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[n]"]
+    uses: dict[Path, list[int]] = {path: [] for path in files}
+    for i, (_, path) in enumerate(placed):
+        uses[path].append(i)
+    for f, path in enumerate(files, start=1):
+        outs = "".join(f"[s{i}]" for i in uses[path])
+        graph.append(f"[{f}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                     f"volume={-abs(project.settings.sfx_volume):.1f}dB,asplit={len(uses[path])}{outs}")
+    for i, (at, _) in enumerate(placed):
+        graph.append(f"[s{i}]adelay={int(round(at * 1000))}:all=1[e{i}]")
+    graph.append("[n]" + "".join(f"[e{i}]" for i in range(len(placed)))
                  + f"amix=inputs={len(placed) + 1}:duration=first:normalize=0[a]")
+    script = target.with_name("narration_sfx_graph.txt")
+    script.write_text(";".join(graph), encoding="utf-8")
     partial = target.with_name(target.stem + ".part.wav")
     subprocess.run(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs, "-filter_complex", ";".join(graph),
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *inputs, "-filter_complex_script", str(script),
          "-map", "[a]", "-c:a", "pcm_s16le", str(partial)],
         check=True,
     )

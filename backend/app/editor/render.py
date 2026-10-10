@@ -279,6 +279,34 @@ def _frame_count(start: float, end: float) -> int:
     return max(1, round(end * FPS) - round(start * FPS))
 
 
+def _comic_size(candidate: Candidate, settings: RenderSettings) -> tuple[int, int]:
+    """How large a comic page is drawn: comic_width of the screen's width."""
+    with Image.open(candidate.image_path) as image:
+        page_w, page_h = image.size
+    width = _even(WIDTH * min(1.0, max(0.2, settings.comic_width)))
+    return width, _even(width * page_h / page_w)
+
+
+def needs_background(candidate: Candidate | None, settings: RenderSettings) -> bool:
+    """Whether anything shows behind this clip - the scenery track, in a framed
+    video. Not when the clip covers the screen: a comic page at full width, footage
+    shown full screen; and a photo brings its own background."""
+    if candidate is None or settings.layout != "framed" or candidate.kind == "photo":
+        return False
+    if candidate.kind == "comic" and candidate.image_path:
+        width, height = _comic_size(candidate, settings)
+        return width < WIDTH or height < HEIGHT
+    cw, ch, _, _ = source_crop(candidate.file_path)
+    if not (settings.wide_full_screen and cw / ch >= WIDE_ASPECT):
+        return True
+    # as in _rate_segment_args: wider than the screen and not zoomed all the way
+    # is a band with the background above and below it
+    wider_than_screen = cw / ch > WIDTH / HEIGHT + 0.01
+    fit_height = _even(WIDTH * ch / cw) if wider_than_screen else HEIGHT
+    fill = min(1.0, max(0.0, settings.wide_fill))
+    return wider_than_screen and _even(fit_height + (HEIGHT - fit_height) * fill) < HEIGHT
+
+
 def _comic_args(
     candidate: Candidate, frames: int, settings: RenderSettings, encode: list[str],
     track: Path | None, track_frame: int, track_identity: list | None, upward: bool = False, factor: int = 1,
@@ -286,11 +314,9 @@ def _comic_args(
     """A page of a comic in place of a clip: the page as a column in the middle of
     the screen, scrolling from its top to its bottom over the clip's length (from its
     bottom to its top when `upward`), with no frame around it. Behind it, blurred and
-    dimmed, is the background scenery when the project has it, otherwise the page itself."""
-    with Image.open(candidate.image_path) as image:
-        page_w, page_h = image.size
-    width = _even(WIDTH * min(1.0, max(0.2, settings.comic_width)))
-    height = _even(width * page_h / page_w)
+    dimmed, is the background scenery when the project has it, otherwise the page itself
+    - and nothing when the page is as wide as the screen and covers it."""
+    width, height = _comic_size(candidate, settings)
     travel = max(0, height - HEIGHT)  # how far the page has to move to show its bottom
     seconds = frames / FPS
     # eased: the page starts and stops gently rather than at full speed
@@ -306,6 +332,12 @@ def _comic_args(
         "comic": candidate.image_path, "frames": frames, "width": width, "blur": settings.blur,
         "dim": settings.dim, "v": ENCODE_VERSION, "upward": upward,
     }
+    if width >= WIDTH and height >= HEIGHT:
+        # The page hides everything behind it: no background is read or drawn, and the
+        # screen is a window moving down the page (exact: a pixel at a time, not two).
+        graph = f"[0:v]{page},crop={WIDTH}:{HEIGHT}:0:'-({y})':exact=1[out]"
+        identity = {"comic": candidate.image_path, "frames": frames, "width": width, "v": ENCODE_VERSION, "upward": upward}
+        return [*inputs, "-filter_complex", graph, "-map", "[out]", *encode], identity
     if track is None:
         graph = (
             f"[0:v]split[a][b];[a]scale={WIDTH // 4}:{HEIGHT // 4}:force_original_aspect_ratio=increase,"
@@ -719,10 +751,14 @@ def _quote_holds(db, source_id: int, start: float, end: float) -> tuple[float, f
 
 # how long the music takes to fade away before a quote and to come back after it
 MUSIC_DIP = 0.6
+# how long a quote's own sound takes to die away after its last word - at most; and
+# for a quote cut before its last word's end was kept
+QUOTE_TAIL_FADE = 0.45
+QUOTE_TAIL_FADE_UNKNOWN = 0.15
 
 
 def _soundtrack(
-    narration: str, interruptions: list[tuple[float, Candidate, int]], music: str | None = None,
+    narration: str, interruptions: list[tuple[float, Candidate, int, float | None]], music: str | None = None,
     narration_seconds: float = 0.0,
 ) -> tuple[list[str], str]:
     """ffmpeg inputs and filter graph for the soundtrack: the narration, cut at each
@@ -760,7 +796,7 @@ def _soundtrack(
 
     order: list[str] = []
     previous = 0.0
-    for i, (cut, clip, frames) in enumerate(interruptions):
+    for i, (cut, clip, frames, tail) in enumerate(interruptions):
         if cut > previous:
             order.append(piece(i, previous, cut))
         else:
@@ -769,10 +805,16 @@ def _soundtrack(
                 graph.append(f"[m{i}]anullsink")
         length = frames / FPS
         inputs += ["-ss", f"{clip.clip_start:.3f}", "-t", f"{length + 0.5:.3f}", "-i", clip.file_path]
-        # padded/trimmed to exactly the quote's video length; short fades avoid clicks at the cuts
+        # padded/trimmed to exactly the quote's video length. Short fades avoid clicks at
+        # the cuts; at the end of a quote the scene's own sound - music, the room - dies
+        # away over the time after the last word rather than stopping dead.
+        fade_out = 0.08
+        if tail is not None:
+            fade_out = QUOTE_TAIL_FADE_UNKNOWN if tail < 0 else min(QUOTE_TAIL_FADE, max(0.08, tail - 0.05))
+        fade_out = min(fade_out, length / 2)
         graph.append(
             f"[{i + first_quote}:a:0]{common},apad,atrim=end={length:.6f},asetpts=PTS-STARTPTS,"
-            f"afade=t=in:d=0.05,afade=t=out:st={max(0.0, length - 0.08):.6f}:d=0.08[q{i}]"
+            f"afade=t=in:d=0.05,afade=t=out:st={max(0.0, length - fade_out):.6f}:d={fade_out:.3f}[q{i}]"
         )
         order.append(f"[q{i}]")
         previous = cut
@@ -884,7 +926,8 @@ def render_project(project_id: str, report) -> None:
     track: Path | None = None
     placed: list[bgtrack.Placed] = []
     speed = min(1.0, max(0.25, project.settings.background_speed))
-    if project.settings.layout == "framed":
+    # built only when some clip leaves room for it to show
+    if any(needs_background(candidate, project.settings) for candidate, _, _, _ in items):
         placed = bgtrack.plan(ranges, [beat.backgrounds for beat in project.beats], total_frames, speed)
     if placed:
         parts_dir = folder / "bgparts"
@@ -912,7 +955,7 @@ def render_project(project_id: str, report) -> None:
 
     ordered: list[Path] = []
     # (narration time where the narration is interrupted, quote clip, its length in frames)
-    interruptions: list[tuple[float, Candidate, int]] = []
+    interruptions: list[tuple[float, Candidate, int, float | None]] = []
     position = 0
     comic_run = 0  # comic pages in a row so far: they scroll down and up in turn
     for candidate, frames, quote, index in items:
@@ -931,7 +974,11 @@ def render_project(project_id: str, report) -> None:
         if quote is not None:
             # cut the narration on the same frame the video cuts on, so nothing drifts
             cut = 0.0 if index < 0 else round(project.beats[index].end * FPS) / FPS
-            interruptions.append((cut, candidate, frames))
+            # the last piece of a quote lets the scene's sound die away after the words
+            tail = None
+            if candidate.clip_end == quote.spans()[-1][1]:
+                tail = candidate.clip_end - quote.speech_end if quote.speech_end is not None else -1.0
+            interruptions.append((cut, candidate, frames, tail))
         position += frames
 
     run_jobs("rendering clips")

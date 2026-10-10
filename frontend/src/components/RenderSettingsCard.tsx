@@ -336,14 +336,15 @@ export default function RenderSettingsCard({
           disabled={busy}
           onChange={(e) => save({ comic_width: Number(e.target.value) })}
         >
-          {[0.4, 0.45, 0.5, 0.55, 0.6, 0.7].map((n) => (
+          {[0.4, 0.45, 0.5, 0.55, 0.6, 0.7, 0.8, 0.9, 1].map((n) => (
             <option key={n} value={n}>
-              {Math.round(n * 100)}% of the screen
+              {n === 1 ? "100% - fills the screen" : `${Math.round(n * 100)}% of the screen`}
             </option>
           ))}
         </select>
         <p className="hint" style={{ marginTop: "0.2rem", marginBottom: 0 }}>
-          Wider: more of the page to scroll through, but a softer picture - the scans are small.
+          Wider: more of the page to scroll through, but a softer picture - the scans are small. At 100% the page
+          covers the screen, so no background is drawn behind it and the clip renders faster.
         </p>
       </Section>
 

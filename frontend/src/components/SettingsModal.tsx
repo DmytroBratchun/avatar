@@ -12,6 +12,8 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const [showKey, setShowKey] = useState(false);
   const [lumeanKey, setLumeanKey] = useState("");
   const [showLumeanKey, setShowLumeanKey] = useState(false);
+  const [openaiKey, setOpenaiKey] = useState("");
+  const [showOpenaiKey, setShowOpenaiKey] = useState(false);
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
@@ -20,6 +22,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
       setModel(settings.caption_model);
       setApiKey(settings.anthropic_api_key_from_env ? "" : settings.anthropic_api_key);
       setLumeanKey(settings.lumean_api_key);
+      setOpenaiKey(settings.openai_api_key);
     }
   }, [settings]);
 
@@ -34,7 +37,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
 
   const saveMutation = useMutation({
     mutationFn: () =>
-      api.updateSettings({ caption_provider: provider, caption_model: model, anthropic_api_key: apiKey, lumean_api_key: lumeanKey.trim() }),
+      api.updateSettings({ caption_provider: provider, caption_model: model, anthropic_api_key: apiKey, lumean_api_key: lumeanKey.trim(), openai_api_key: openaiKey.trim() }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["config"] });
@@ -102,7 +105,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                   <input
                     type={showKey ? "text" : "password"}
                     style={{ flex: 1 }}
-                    placeholder={settings?.anthropic_api_key_from_env ? "using ANTHROPIC_API_KEY from .env" : "sk-ant-…"}
+                    placeholder={settings?.anthropic_api_key_from_env ? "used from .env: ANTHROPIC_API_KEY" : "sk-ant-…"}
                     value={apiKey}
                     onChange={(e) => setApiKey(e.target.value)}
                     spellCheck={false}
@@ -112,9 +115,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                   </button>
                 </div>
                 <p className="hint" style={{ marginTop: "0.4rem" }}>
-                  Only used when provider is set to "Anthropic API key" above. Stored locally in{" "}
-                  <code>backend/data/settings.json</code>, never sent anywhere except Anthropic's API. Leave blank to
-                  keep using the value from <code>.env</code>.
+                  Only for the "Anthropic API key" provider. Blank: from <code>.env</code>.
                 </p>
               </>
             )}
@@ -124,7 +125,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
               <input
                 type={showLumeanKey ? "text" : "password"}
                 style={{ flex: 1 }}
-                placeholder="for the video editor's voice-over"
+                placeholder={settings?.lumean_api_key_from_env ? "used from environment: LUMEAN_KEY" : "…"}
                 value={lumeanKey}
                 onChange={(e) => setLumeanKey(e.target.value)}
                 spellCheck={false}
@@ -134,10 +135,43 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
               </button>
             </div>
             <p className="hint" style={{ marginTop: "0.4rem" }}>
-              Voices a video's script (the Voice tab of a video). The key needs the rights orders.read, orders.write,
-              orders.download, templates.read, templates.write, voices.read and billing.read. Stored locally in{" "}
-              <code>backend/data/settings.json</code>.
+              For voice-over and music. Needs orders, templates, voices and billing rights. Blank: <code>LUMEAN_KEY</code>.
             </p>
+
+            <label style={{ marginTop: "0.75rem" }}>OpenAI API key</label>
+            <div style={{ display: "flex", gap: "0.4rem" }}>
+              <input
+                type={showOpenaiKey ? "text" : "password"}
+                style={{ flex: 1 }}
+                placeholder={settings?.openai_api_key_from_env ? "used from environment: OPENAI_API_KEY" : "sk-…"}
+                value={openaiKey}
+                onChange={(e) => setOpenaiKey(e.target.value)}
+                spellCheck={false}
+              />
+              <button type="button" className="ghost small" onClick={() => setShowOpenaiKey((v) => !v)}>
+                {showOpenaiKey ? "hide" : "show"}
+              </button>
+            </div>
+            <p className="hint" style={{ marginTop: "0.4rem" }}>
+              Not used yet (planned: characters for the editor). Blank: <code>OPENAI_API_KEY</code>.
+            </p>
+
+            <p className="hint" style={{ margin: "0.75rem 0 0" }}>
+              Keys are kept in <code>backend/data/settings.json</code>.
+            </p>
+
+            <label style={{ marginTop: "0.75rem" }}>Usage dashboards</label>
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+              <button type="button" className="ghost small" onClick={() => window.open("https://claude.ai/settings/usage", "_blank", "noreferrer")}>
+                Claude subscription ↗
+              </button>
+              <button type="button" className="ghost small" onClick={() => window.open("https://console.anthropic.com/settings/usage", "_blank", "noreferrer")}>
+                Anthropic API ↗
+              </button>
+              <button type="button" className="ghost small" onClick={() => window.open("https://platform.openai.com/usage", "_blank", "noreferrer")}>
+                OpenAI ↗
+              </button>
+            </div>
 
             <div style={{ marginTop: "0.75rem", display: "flex", gap: "0.5rem", alignItems: "center" }}>
               <button className="primary" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>

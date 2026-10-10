@@ -107,6 +107,9 @@ export interface SettingsOut {
   anthropic_api_key: string;
   anthropic_api_key_from_env: boolean;
   lumean_api_key: string;
+  lumean_api_key_from_env: boolean;
+  openai_api_key: string;
+  openai_api_key_from_env: boolean;
 }
 
 export interface SceneOut {
@@ -338,6 +341,14 @@ export interface EditorMusicTrack {
   end: number;
   loudness: number | null;
   enabled: boolean;
+  // taken from the music library rather than composed for this video
+  from_library: boolean;
+}
+
+/** Which of a project's tracks are in the music library, and where else they play. */
+export interface MusicLibraryUsage {
+  enabled: boolean;
+  tracks: Record<string, { from_library: boolean; used_in: string[] }>;
 }
 
 /** A stretch of the narration with one mood, and the music composed for it. */
@@ -488,6 +499,7 @@ export interface EditorProject {
     quote_cuts: boolean;
     music_enabled: boolean;
     music_level: number;
+    music_library_only: boolean;
     comic_width: number;
     sound_effects: boolean;
     sfx_volume: number;
@@ -590,7 +602,13 @@ export const api = {
   getLocalWorkerStatus: () => request<WorkerStatusOut>("/api/worker/local-status"),
 
   getSettings: () => request<SettingsOut>("/api/settings"),
-  updateSettings: (payload: { caption_provider?: string; caption_model?: string; anthropic_api_key?: string; lumean_api_key?: string }) =>
+  updateSettings: (payload: {
+    caption_provider?: string;
+    caption_model?: string;
+    anthropic_api_key?: string;
+    lumean_api_key?: string;
+    openai_api_key?: string;
+  }) =>
     request<SettingsOut>("/api/settings", { method: "PATCH", body: JSON.stringify(payload) }),
 
   search: (params: Record<string, QueryValue>) => request<SearchResult[]>(`/api/search${buildQuery(params)}`),
@@ -663,6 +681,7 @@ export const api = {
       quote_cuts?: boolean;
       music_enabled?: boolean;
       music_level?: number;
+      music_library_only?: boolean;
       comic_width?: number;
       sound_effects?: boolean;
       sfx_volume?: number;
@@ -740,6 +759,7 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ enabled }),
     }),
+  getMusicLibraryUsage: (id: string) => request<MusicLibraryUsage>(`/api/editor/projects/${id}/music/library`),
   replanMusic: (id: string) => request<EditorProject>(`/api/editor/projects/${id}/music/replan`, { method: "POST" }),
   musicFileUrl: (id: string, file: string) => `${BASE_URL}/api/editor/projects/${id}/music/files/${file}`,
   claudeUsage: () => request<ClaudeUsage>("/api/worker/claude-usage"),

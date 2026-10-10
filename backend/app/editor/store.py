@@ -159,6 +159,9 @@ class MusicTrack(BaseModel):
     end: float
     loudness: float | None = None  # LUFS of start..end
     enabled: bool = True  # unticked by the user: left out of the video
+    # its id in the music library (editor/music_library.py), once it is filed there
+    library_id: str = ""
+    from_library: bool = False  # taken from the library, not composed for this video
 
 
 class MusicBlock(BaseModel):
@@ -173,6 +176,8 @@ class MusicBlock(BaseModel):
     mood: str = ""
     prompt: str = ""  # what the music generator is asked for
     tracks: list[MusicTrack] = Field(default_factory=list)
+    # library tracks this block had and the user threw away by composing it again
+    avoid: list[str] = Field(default_factory=list)
 
 
 class QuotePart(BaseModel):
@@ -181,6 +186,7 @@ class QuotePart(BaseModel):
     start: float
     end: float
     text: str = ""
+    speech_end: float | None = None  # where its last word stops, in episode time
 
 
 class Quote(BaseModel):
@@ -207,6 +213,9 @@ class Quote(BaseModel):
     text: str
     speaker: str = ""
     reason: str = ""
+    # where the last word of the quote stops, in episode time: after it the clip
+    # lets the scene's sound die away instead of cutting it (None = not known)
+    speech_end: float | None = None
 
     def spans(self) -> list[tuple[float, float]]:
         """The stretches of the episode that play, in order."""
@@ -258,6 +267,8 @@ class RenderSettings(BaseModel):
     # how wide a comic page is shown, as a share of the screen's width. Wider means
     # more of the page to scroll through, and a softer picture: the scans are small
     comic_width: float = 0.55
+    # compose no new music: fill the blocks from the music library only
+    music_library_only: bool = False
     # standard sound effects (editor/sounds.py) at the start of comic pages and photos,
     # played this many dB below their normalised peak
     sound_effects: bool = True
