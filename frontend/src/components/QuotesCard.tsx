@@ -1,5 +1,5 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, quoteSeconds, quoteSpans } from "../api/client";
 import type { EditorProject, EditorQuote, EditorWord } from "../api/client";
 
@@ -28,18 +28,122 @@ const endsSentence = (word: string) => /[.!?…]["']?$/.test(word);
 // at least this many words (a lone "And Zaheer proved it." says nothing by itself)
 const CONTEXT_WORDS = 35;
 
-/** The narration leading up to word `afterWord` and the narration that follows it. */
-function around(words: EditorWord[], afterWord: number): { before: string; after: string } {
-  if (words.length === 0) return { before: "", after: "" };
+/** A sentence of the narration as word indexes (inclusive) and its text. */
+type Sentence = { first: number; last: number; text: string };
+
+function sentences(words: EditorWord[], first: number, last: number): Sentence[] {
+  const out: Sentence[] = [];
+  let start = first;
+  for (let i = first; i <= last; i++) {
+    if (endsSentence(words[i].text) || i === last) {
+      out.push({ first: start, last: i, text: words.slice(start, i + 1).map((w) => w.text).join(" ") });
+      start = i + 1;
+    }
+  }
+  return out;
+}
+
+/** The narration leading up to word `afterWord` and the narration that follows it,
+ * in sentences. */
+function around(words: EditorWord[], afterWord: number): { before: Sentence[]; after: Sentence[] } {
+  if (words.length === 0) return { before: [], after: [] };
   let start = afterWord;
   // back to the start of a sentence, and further back while the context is still short
   while (start > 0 && (!endsSentence(words[start - 1].text) || afterWord - start + 1 < CONTEXT_WORDS)) start--;
   let end = afterWord + 1;
   while (end < words.length - 1 && (!endsSentence(words[end].text) || end - afterWord < CONTEXT_WORDS)) end++;
   return {
-    before: words.slice(start, afterWord + 1).map((w) => w.text).join(" "),
-    after: afterWord + 1 < words.length ? words.slice(afterWord + 1, end + 1).map((w) => w.text).join(" ") : "",
+    before: sentences(words, start, afterWord),
+    after: afterWord + 1 < words.length ? sentences(words, afterWord + 1, end) : [],
   };
+}
+
+/** What the narration player is playing: a stretch of the narration, in seconds. */
+type Listening = { start: number; end: number; at: number } | null;
+
+/** One player for the narration around all the quotes: playing a stretch stops
+ * whatever was playing before. */
+function useNarration(projectId: string) {
+  const audio = useRef<HTMLAudioElement | null>(null);
+  const [listening, setListening] = useState<Listening>(null);
+  const stretch = useRef<Listening>(null);
+
+  useEffect(() => {
+    const player = new Audio(api.editorAudioUrl(projectId));
+    player.preload = "none";
+    const onTime = () => {
+      const current = stretch.current;
+      if (!current) return;
+      if (player.currentTime >= current.end) {
+        player.pause();
+        stretch.current = null;
+        setListening(null);
+      } else {
+        setListening({ ...current, at: player.currentTime });
+      }
+    };
+    player.addEventListener("timeupdate", onTime);
+    audio.current = player;
+    return () => {
+      player.pause();
+      player.removeEventListener("timeupdate", onTime);
+    };
+  }, [projectId]);
+
+  function play(start: number, end: number) {
+    const player = audio.current;
+    if (!player) return;
+    // a click on what is playing stops it
+    if (stretch.current && stretch.current.start === start && stretch.current.end === end) {
+      player.pause();
+      stretch.current = null;
+      setListening(null);
+      return;
+    }
+    stretch.current = { start, end, at: start };
+    setListening(stretch.current);
+    player.currentTime = start;
+    void player.play();
+  }
+
+  return { listening, play };
+}
+
+/** Sentences of the narration that play from where they are clicked, up to `until`
+ * (seconds); the one being heard is marked. */
+function Narration({
+  words,
+  sentences: list,
+  until,
+  listening,
+  play,
+}: {
+  words: EditorWord[];
+  sentences: Sentence[];
+  until: number;
+  listening: Listening;
+  play: (start: number, end: number) => void;
+}) {
+  return (
+    <>
+      {list.map((s, n) => {
+        const start = words[s.first].start;
+        const heard = listening != null && listening.end === until && listening.at >= start && listening.at < words[s.last].end + 0.3;
+        return (
+          <span key={s.first}>
+            {n > 0 && " "}
+            <span
+              className={`narration-sentence${heard ? " heard" : ""}`}
+              title="Click to hear the narration from here"
+              onClick={() => play(start, until)}
+            >
+              {s.text}
+            </span>
+          </span>
+        );
+      })}
+    </>
+  );
 }
 
 /** Plays a quote the way it will sound in the video: its pieces back to back,
@@ -81,12 +185,16 @@ function QuoteRow({
   quote,
   words,
   disabled,
+  listening,
+  play,
   onChange,
 }: {
   project: EditorProject;
   quote: EditorQuote;
   words: EditorWord[];
   disabled: boolean;
+  listening: Listening;
+  play: (start: number, end: number) => void;
   onChange: (project: EditorProject) => void;
 }) {
   const [previewing, setPreviewing] = useState(false);
@@ -125,7 +233,12 @@ function QuoteRow({
       {/* the quote where it will sit: the narration before it, the quote, the narration after */}
       <div style={{ margin: "0.4rem 0", fontSize: "0.9rem" }}>
         <p className="hint" style={{ margin: 0 }}>
-          …{context.before || quote.after_text}
+          …
+          {context.before.length > 0 ? (
+            <Narration words={words} sentences={context.before} until={words[quote.after_word].end} listening={listening} play={play} />
+          ) : (
+            quote.after_text
+          )}
         </p>
         <p
           style={{ margin: "0.25rem 0", paddingLeft: "0.6rem", borderLeft: "3px solid var(--accent)", cursor: "help" }}
@@ -134,7 +247,20 @@ function QuoteRow({
           “{quote.text}”
         </p>
         <p className="hint" style={{ margin: 0 }}>
-          {context.after ? `${context.after}…` : "(end of the narration)"}
+          {context.after.length > 0 ? (
+            <>
+              <Narration
+                words={words}
+                sentences={context.after}
+                until={words[context.after[context.after.length - 1].last].end}
+                listening={listening}
+                play={play}
+              />
+              …
+            </>
+          ) : (
+            "(end of the narration)"
+          )}
         </p>
       </div>
 
@@ -348,6 +474,8 @@ export default function QuotesCard({
     enabled: project.quotes.length > 0,
   });
 
+  const { listening, play } = useNarration(project.id);
+
   if (project.quotes.length === 0) return null;
   const approved = project.quotes.filter((q) => q.status === "approved");
   const added = approved.reduce((sum, q) => sum + quoteSeconds(q), 0);
@@ -363,11 +491,11 @@ export default function QuotesCard({
       </div>
       <p className="hint">
         Clips from the show that play with their own sound between two parts of the narration, shown here between the
-        sentences they would sit between. Hover a quote to see why it was suggested. Only quotes you add are used;
-        render again to see them.
+        sentences they would sit between. Hover a quote to see why it was suggested, click a sentence to hear the
+        narration from there. Only quotes you add are used; render again to see them.
       </p>
       {project.quotes.map((quote) => (
-        <QuoteRow key={`${quote.id}-${quote.clip_start}-${quote.clip_end}-${quote.parts.length}`} project={project} quote={quote} words={words ?? []} disabled={disabled} onChange={onChange} />
+        <QuoteRow key={`${quote.id}-${quote.clip_start}-${quote.clip_end}-${quote.parts.length}`} project={project} quote={quote} words={words ?? []} disabled={disabled} listening={listening} play={play} onChange={onChange} />
       ))}
     </div>
   );

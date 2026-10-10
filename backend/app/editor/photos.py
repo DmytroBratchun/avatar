@@ -107,7 +107,9 @@ def photo_candidates(project_id: str, slot: Slot, narration: str, cache: dict) -
     duration = round(slot.end - slot.start, 3)
     candidates = []
     for rank, item in enumerate(cache[query]):
-        if not Path(item["path"]).exists():
+        # stored by name: the project folder can move (older caches hold full paths)
+        name = Path(item["path"]).name
+        if not (store.project_dir(project_id) / "photos" / name).exists():
             continue
         # a negative id of its own, so the same photo is not used twice (see footage.Usage)
         ident = -int(hashlib.sha1(item["title"].encode("utf-8")).hexdigest()[:7], 16)
@@ -115,9 +117,9 @@ def photo_candidates(project_id: str, slot: Slot, narration: str, cache: dict) -
             Candidate(
                 scene_id=ident,
                 source_id=ident,
-                file_path=item["path"],
+                file_path=f"photos/{name}",
                 kind="photo",
-                image_path=item["path"],
+                image_path=f"photos/{name}",
                 show_title="Photo",
                 scene_start=0.0,
                 scene_end=0.0,

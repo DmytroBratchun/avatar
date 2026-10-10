@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter
 
-from app.config import DATA_DIR
+from app.config import DATA_DIR, data_path
 from app.editor import bgtrack, store
 from app.editor.store import Candidate, Project, Quote, RenderSettings
 
@@ -38,6 +38,23 @@ PARALLEL_ENCODES = 3
 # repeated. (An input opened with -loop 1 is decoded again for every output frame, and
 # every filter after it runs again on the same picture - most of a clip's time.)
 STILL = "loop=loop=-1:size=1:start=0"
+
+# A show that may only be shown as stills (Universe.still_shows): a slot of its
+# footage shows one frame of the clip - the scene's keyframe when one falls inside it -
+# with a slow pan across it, the picture enlarged a little so there is room to move.
+# Each move goes from one point to another, as fractions of that room (0 = the left or
+# top edge, 1 = the right or bottom edge). Neighbouring stills never get the same move.
+STILL_MOVES = {
+    "left_to_right": ((0.0, 0.5), (1.0, 0.5)),
+    "right_to_left": ((1.0, 0.5), (0.0, 0.5)),
+    "bottom_left_to_top_right": ((0.0, 1.0), (1.0, 0.0)),
+    "top_right_to_bottom_left": ((1.0, 0.0), (0.0, 1.0)),
+    "top_left_to_bottom_right": ((0.0, 0.0), (1.0, 1.0)),
+    "bottom_right_to_top_left": ((1.0, 1.0), (0.0, 0.0)),
+}
+# the frame is enlarged this many times before the moving crop is taken from it, so
+# the crop's whole-pixel steps are a fraction of a pixel on screen (no judder)
+STILL_UPSCALE = 3
 
 FRAMES_DIR_NAME = "_frames"
 BORDER_FRAME = "border"
@@ -298,6 +315,19 @@ def prepare_mask(width: int, height: int, radii: tuple[int, int, int, int], cach
 # --- segments ---------------------------------------------------------------
 
 
+def on_disk(candidate: Candidate | None, folder: Path) -> Candidate | None:
+    """The candidate with its pictures as full paths: a comic page is stored relative
+    to DATA_DIR, a photo relative to its project's folder."""
+    if candidate is None or not candidate.image_path:
+        return candidate
+    if candidate.kind == "comic":
+        return candidate.model_copy(update={"image_path": str(data_path(candidate.image_path))})
+    if candidate.kind == "photo" and not Path(candidate.image_path).is_absolute():
+        path = str(folder / candidate.image_path)
+        return candidate.model_copy(update={"image_path": path, "file_path": path})
+    return candidate
+
+
 def _frame_count(start: float, end: float) -> int:
     # from absolute positions, not the duration, so rounding never accumulates into audio drift
     return max(1, round(end * FPS) - round(start * FPS))
@@ -442,6 +472,69 @@ def _photo_args(
     return [*inputs, "-filter_complex", graph, "-map", "[out]", *encode], identity
 
 
+def still_source_ids(db) -> set[int]:
+    """Sources whose footage may only be shown as stills."""
+    from sqlalchemy import select as sa_select
+
+    from app.db.models import Source
+    from app.services.universes import still_shows
+
+    shows = still_shows()
+    if not shows:
+        return set()
+    return set(db.execute(sa_select(Source.id).where(Source.show_title.in_(shows))).scalars())
+
+
+def still_time(candidate: Candidate) -> float:
+    """Which frame of a clip a still shows: the one the user picked, else the
+    keyframe its scene was indexed by, when one falls inside the clip (nearest its
+    middle), else the clip's middle."""
+    from app.pipeline.stages.extract_keyframes import _OFFSETS_BY_COUNT, _keyframe_count_for_duration
+
+    if candidate.still_at is not None:
+        return round(candidate.still_at, 3)
+    duration = candidate.scene_end - candidate.scene_start
+    middle = (candidate.clip_start + candidate.clip_end) / 2
+    times = [candidate.scene_start + duration * offset for offset in _OFFSETS_BY_COUNT[_keyframe_count_for_duration(duration)]]
+    # a couple of frames clear of the clip's ends, which may sit on a cut
+    inside = [t for t in times if candidate.clip_start + 2 / FPS <= t <= candidate.clip_end - 2 / FPS]
+    return round(min(inside, key=lambda t: abs(t - middle)) if inside else middle, 3)
+
+
+def still_move(candidate: Candidate, previous: str | None) -> str:
+    """The camera move over a still: fixed by the frame itself, so a re-render keeps
+    it, and never the same as the still just before it."""
+    seed = int(hashlib.sha1(f"{candidate.file_path}|{still_time(candidate)}".encode()).hexdigest(), 16)
+    names = list(STILL_MOVES)
+    move = names[seed % len(names)]
+    if move == previous:
+        move = names[(seed + 1) % len(names)]
+    return move
+
+
+def _still_chain(cw: int, ch: int, cx: int, cy: int, frames: int, move: str, factor: int) -> str:
+    """Filters turning the first frame of the input into a moving picture of the
+    clip's length, at the output rate, cw:ch cropped and fitted to the screen."""
+    scale = min(WIDTH / cw, HEIGHT / ch)
+    width, height = _even(cw * scale), _even(ch * scale)
+    count = frames * factor
+    seconds = frames / FPS
+    progress = f"min(1,on/{max(1, count - 1)})"
+    eased = f"({progress}*{progress}*(3-2*{progress}))"
+    # how far the pan goes: the picture is enlarged by this much and moves across the
+    # spare - gentle on a short slot, at most 15% of the picture
+    amount = min(0.15, 0.035 * seconds)
+    (x0, y0), (x1, y1) = STILL_MOVES[move]
+    z = f"{1 + amount:.4f}"
+    x = f"(iw-iw/zoom)*({x0}+{x1 - x0}*{eased})"
+    y = f"(ih-ih/zoom)*({y0}+{y1 - y0}*{eased})"
+    return (
+        f"trim=end_frame=1,setpts=PTS-STARTPTS,crop={cw}:{ch}:{cx}:{cy},setsar=1,"
+        f"scale={width * STILL_UPSCALE}:{height * STILL_UPSCALE}:flags=lanczos,"
+        f"zoompan=z='{z}':x='{x}':y='{y}':d={count}:s={width}x{height}:fps={_rate(factor)},setsar=1"
+    )
+
+
 def _segment_args(
     candidate: Candidate | None,
     frames: int,
@@ -453,17 +546,19 @@ def _segment_args(
     track_identity: list | None = None,
     mask: Path | None = None,
     upward: bool = False,
+    still: str | None = None,
 ) -> tuple[list[str], dict]:
     """ffmpeg arguments (without the output path) and the cache identity for one slot.
     `frames` and `track_frame` are on the FPS clock whatever the output rate.
-    `upward` scrolls a comic page from its bottom to its top."""
+    `upward` scrolls a comic page from its bottom to its top. `still` names the
+    pan (STILL_MOVES) when the clip may only be shown as a still frame."""
     factor = _rate_factor(settings)
     args, identity = _rate_segment_args(
-        candidate, frames, settings, overlay, window, track, track_frame, track_identity, mask, upward, factor
+        candidate, frames, settings, overlay, window, track, track_frame, track_identity, mask, upward, factor, still
     )
     if factor > 1:
         identity["fps"] = settings.frame_rate
-        if "-filter_complex" in args and "comic" not in identity and "photo" not in identity:
+        if "-filter_complex" in args and not {"comic", "photo", "still"} & identity.keys():
             # Footage is composed on the FPS clock and only then repeated: its frames sit
             # exactly on every other output frame, so each shows twice, in clean pairs.
             # (Raising the rate before a held start or end shifts the pairs by one.)
@@ -486,6 +581,7 @@ def _rate_segment_args(
     mask: Path | None,
     upward: bool,
     factor: int,
+    still: str | None = None,
 ) -> tuple[list[str], dict]:
     encode = [
         "-frames:v", str(frames * factor), "-an",
@@ -525,6 +621,17 @@ def _rate_segment_args(
     }
     if hold:
         identity["hold"] = [held_start, held_end]
+    # the rate the picture is composed at: footage at its own, a still at the output's
+    # (its move is drawn by the renderer, so it gets the in-between positions)
+    compose_rate = f"{FPS_NUM}/{FPS_DEN}"
+    if still and candidate.kind == "video":
+        at = still_time(candidate)
+        base = _still_chain(cw, ch, cx, cy, frames, still, factor)
+        seek = ["-ss", f"{at:.3f}", "-i", candidate.file_path]
+        identity.pop("start")
+        identity.pop("hold", None)
+        identity["still"] = [at, still]
+        compose_rate = _rate(factor)
 
     # A widescreen source (Korra) already fills a 16:9 screen and is sharp enough to,
     # so in a framed video it is shown full screen rather than cropped into the 4:3
@@ -579,7 +686,7 @@ def _rate_segment_args(
         inputs += ["-ss", f"{seek_to:.5f}", "-i", str(track)]
         graph = (
             f"[0:v]{base},{fg_chain};"
-            f"[1:v]fps={FPS_NUM}/{FPS_DEN},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop=-1,gblur=sigma={sigma:.2f},"
+            f"[1:v]fps={compose_rate},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop=-1,gblur=sigma={sigma:.2f},"
             f"colorchannelmixer=rr={keep:.3f}:gg={keep:.3f}:bb={keep:.3f},scale={WIDTH}:{HEIGHT}[bg]"
         )
         identity["background"] = track_identity
@@ -718,7 +825,7 @@ def _comic_preview_clips(own: list[tuple[Candidate, float, float | None]]) -> tu
                 scene for scene in db.execute(
                     sa_select(Scene).where(Scene.source_id == source.id).order_by(Scene.start_time)
                 ).scalars()
-                if scene.keyframe_paths and Path(scene.keyframe_paths[0]).exists()
+                if scene.keyframe_paths and data_path(scene.keyframe_paths[0]).exists()
             ]
             if scenes:
                 return "library", [(page_candidate(scene, source, 5.0, 0.0), 5.0, None) for scene in scenes[:10]]
@@ -735,9 +842,18 @@ def render_preview(project: Project, slot_index: int, fmt: str | None = None) ->
     if not clips:
         raise RuntimeError("Find footage first - there is nothing to preview yet")
     chosen, duration, at = clips[slot_index % len(clips)]
-    # the middle of the clip is more representative than its first frame
+    chosen = on_disk(chosen, store.project_dir(project.id))
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        still = still_move(chosen, None) if chosen.kind == "video" and chosen.source_id in still_source_ids(db) else None
+    finally:
+        db.close()
+    # the middle of the clip is more representative than its first frame (a still
+    # is shown from its first frame: the frame is the same, the move only begins)
     middle = duration / 2
-    candidate = chosen.model_copy(update={"clip_start": chosen.clip_start + middle})
+    candidate = chosen if still else chosen.model_copy(update={"clip_start": chosen.clip_start + middle})
 
     folder = store.project_dir(project.id)
     cache_dir = folder / "cache"
@@ -758,7 +874,7 @@ def render_preview(project: Project, slot_index: int, fmt: str | None = None) ->
     frames = max(1, round(duration * FPS)) if candidate.kind == "comic" else 1
     args, _ = _segment_args(
         candidate, frames, project.settings, overlay, window,
-        track=track, track_frame=round(track_time * FPS), track_identity=[], mask=mask,
+        track=track, track_frame=round(track_time * FPS), track_identity=[], mask=mask, still=still,
     )
     cache_dir.mkdir(exist_ok=True)
     out = cache_dir / "preview.jpg"
@@ -920,11 +1036,12 @@ def render_project(project_id: str, report) -> None:
 
     db = SessionLocal()  # read only: where the shots of a quote's episode change
     try:
+        stills = still_source_ids(db)
         add_quotes(-1)
         for index, beat in enumerate(project.beats):
             beat_start = 0 if index == 0 else position
             for slot in beat.slots:
-                candidate = slot.candidates[slot.selected] if slot.selected is not None else None
+                candidate = on_disk(slot.candidates[slot.selected], folder) if slot.selected is not None else None
                 frames = _frame_count(slot.start, slot.end)
                 items.append((candidate, frames, None, index))
                 position += frames
@@ -966,14 +1083,25 @@ def render_project(project_id: str, report) -> None:
     track: Path | None = None
     placed: list[bgtrack.Placed] = []
     speed = min(1.0, max(0.25, project.settings.background_speed))
-    # built only when some clip leaves room for it to show
-    if any(needs_background(candidate, project.settings) for candidate, _, _, _ in items):
-        placed = bgtrack.plan(ranges, [beat.backgrounds for beat in project.beats], total_frames, speed)
+    # built only where some clip leaves room for it to show; elsewhere the track is black
+    shown: list[tuple[int, int]] = []
+    at = 0
+    for candidate, frames, _, _ in items:
+        if needs_background(candidate, project.settings):
+            if shown and shown[-1][1] == at:
+                shown[-1] = (shown[-1][0], at + frames)
+            else:
+                shown.append((at, at + frames))
+        at += frames
+    if shown:
+        # scenery chosen before its show was made stills-only is left out
+        backgrounds = [[b for b in beat.backgrounds if b.source_id not in stills] for beat in project.beats]
+        placed = bgtrack.plan(ranges, backgrounds, total_frames, speed)
     if placed:
         parts_dir = folder / "bgparts"
         parts_dir.mkdir(exist_ok=True)
         track_parts: list[Path] = []
-        for path, args in bgtrack.pieces(placed, source_crop, parts_dir, speed):
+        for path, args in bgtrack.pieces(placed, source_crop, parts_dir, speed, shown):
             track_parts.append(path)
             if not path.exists() and all(path != queued for queued, _ in jobs):
                 jobs.append((path, args))
@@ -998,12 +1126,17 @@ def render_project(project_id: str, report) -> None:
     interruptions: list[tuple[float, Candidate, int, float | None]] = []
     position = 0
     comic_run = 0  # comic pages in a row so far: they scroll down and up in turn
+    last_move: str | None = None  # the move of the still just before, if the slot before was one
     for candidate, frames, quote, index in items:
         is_comic = candidate is not None and candidate.kind == "comic"
+        still = None
+        if candidate is not None and candidate.kind == "video" and candidate.source_id in stills:
+            still = still_move(candidate, last_move)
+        last_move = still
         args, identity = _segment_args(
             candidate, frames, project.settings, overlay, window,
             track=track, track_frame=position, track_identity=bgtrack.slice_identity(placed, position, frames, speed),
-            mask=mask, upward=is_comic and comic_run % 2 == 1,
+            mask=mask, upward=is_comic and comic_run % 2 == 1, still=still,
         )
         comic_run = comic_run + 1 if is_comic else 0
         name = hashlib.sha1(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]

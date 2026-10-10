@@ -39,6 +39,7 @@ from sqlalchemy.orm import Session
 from app.db.models import BankQuote, Source, TranscriptLine
 from app.editor.llm import run_claude_json
 from app.editor.store import Project, Quote, QuotePart, Word, project_shows, project_universe
+from app.services.universes import still_shows
 
 logger = logging.getLogger(__name__)
 
@@ -624,9 +625,14 @@ def find_quotes(db: Session, project: Project, words: list[Word], cwd: Path, rep
         stmt = stmt.where(Source.show_title.in_(shows))
     # only episodes that have a transcript to read
     transcribed = set(db.execute(select(TranscriptLine.source_id).distinct()).scalars())
-    episodes = {source.id: source for source in db.execute(stmt).scalars() if source.id in transcribed}
+    # a show that may only be shown as stills is not quoted either: a quote plays its sound
+    stills = still_shows()
+    episodes = {
+        source.id: source for source in db.execute(stmt).scalars()
+        if source.id in transcribed and source.show_title not in stills
+    }
     if not episodes:
-        raise RuntimeError("None of this project's shows has a transcript yet")
+        raise RuntimeError("None of this project's shows has a transcript yet (or may be quoted)")
 
     report("looking for places a quote would help")
     cuts = project.settings.quote_cuts

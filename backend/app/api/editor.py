@@ -710,6 +710,9 @@ def get_photo_file(project_id: str, name: str):
 class SlotUpdateIn(BaseModel):
     selected: int | None = None
     locked: bool | None = None
+    # the frame the selected candidate shows as a still (seconds in its file); sent
+    # as null, goes back to the scene's keyframe
+    still_at: float | None = None
 
 
 class SlotSearchIn(BaseModel):
@@ -744,8 +747,47 @@ def update_slot(project_id: str, beat_id: str, slot_index: int, payload: SlotUpd
             target.locked = True
         if payload.locked is not None:
             target.locked = payload.locked
+        if "still_at" in payload.model_fields_set and target.selected is not None:
+            target.candidates[target.selected].still_at = payload.still_at
+            target.locked = payload.locked if payload.locked is not None else True
 
     return store.update_project(project_id, apply)
+
+
+@router.get("/projects/{project_id}/beats/{beat_id}/slots/{slot_index}/candidates/{index}/still")
+def candidate_still(project_id: str, beat_id: str, slot_index: int, index: int, width: int = 640):
+    """The frame a candidate would show as a still in the video."""
+    from app.api.media import frame_jpeg
+    from app.config import data_path
+    from app.editor.render import still_time
+
+    project = _load(project_id)
+    beat = next((b for b in project.beats if b.id == beat_id), None)
+    if beat is None or not 0 <= slot_index < len(beat.slots) or not 0 <= index < len(beat.slots[slot_index].candidates):
+        raise HTTPException(404, "No such candidate")
+    candidate = beat.slots[slot_index].candidates[index]
+    if candidate.kind != "video" or not Path(candidate.file_path).exists():
+        raise HTTPException(404, "Not footage")
+    at = still_time(candidate)
+    if candidate.still_at is None and width <= 768:
+        # most stills show their scene's keyframe, which is already on disk at that size
+        from app.db.models import Scene
+        from app.db.session import SessionLocal
+        from app.pipeline.stages.extract_keyframes import _OFFSETS_BY_COUNT
+
+        db = SessionLocal()
+        try:
+            scene = db.get(Scene, candidate.scene_id)
+            # a scene re-indexed since has other keyframes
+            same = scene is not None and abs(scene.start_time - candidate.scene_start) < 1e-3 and abs(scene.end_time - candidate.scene_end) < 1e-3
+            paths = list(scene.keyframe_paths or []) if same else []
+        finally:
+            db.close()
+        duration = candidate.scene_end - candidate.scene_start
+        for offset, path in zip(_OFFSETS_BY_COUNT.get(len(paths), []), paths):
+            if abs(candidate.scene_start + duration * offset - at) < 1e-3 and data_path(path).exists():
+                return FileResponse(data_path(path), media_type="image/jpeg")
+    return FileResponse(frame_jpeg(candidate.file_path, at, width), media_type="image/jpeg")
 
 
 @router.post("/projects/{project_id}/beats/{beat_id}/slots/{slot_index}/search", response_model=Project)

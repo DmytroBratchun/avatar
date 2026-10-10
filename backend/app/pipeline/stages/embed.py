@@ -3,6 +3,7 @@ import datetime as dt
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import data_path
 from app.db.models import Scene, Source
 from app.services.embeddings import embed_image, embed_text, text_embedding_model_id, visual_embedding_model_id
 from app.vectorstore.sqlite_vec_client import upsert_text_vector, upsert_visual_vector
@@ -31,7 +32,7 @@ def run_embedding(db: Session, source: Source) -> None:
             scene.text_embedding_model = text_embedding_model_id()
         # a comic's pages are found by what happens on them, not by how they look
         if scene.keyframe_paths and source.kind != "comic":
-            upsert_visual_vector(db, scene.id, embed_image(scene.keyframe_paths[0]))
+            upsert_visual_vector(db, scene.id, embed_image(str(data_path(scene.keyframe_paths[0]))))
             scene.visual_embedding_model = visual_embedding_model_id()
         scene.embedded_at = dt.datetime.now(dt.timezone.utc)
         source.current_stage_detail = f"embedding {i + 1}/{total}"
@@ -54,7 +55,7 @@ def run_visual_embedding_only(db: Session, source: Source) -> None:
             source.current_stage_detail = None
             db.commit()
             return
-        upsert_visual_vector(db, scene.id, embed_image(scene.keyframe_paths[0]))
+        upsert_visual_vector(db, scene.id, embed_image(str(data_path(scene.keyframe_paths[0]))))
         scene.visual_embedding_model = visual_embedding_model_id()
         source.current_stage_detail = f"visual reindex {i + 1}/{total}"
         db.commit()

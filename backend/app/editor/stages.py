@@ -112,6 +112,89 @@ def _redo_stuck(model, audio_path, words: list[Word], report: Report) -> list[Wo
     return words
 
 
+# a stretch the script and Whisper word differently is re-timed from the script when
+# neither side of it is longer than this; a longer one is the audio departing from
+# the script (an ad-lib, a cut sentence) and keeps what Whisper heard
+MAX_RETIMED_WORDS = 6
+# below this share of Whisper's words found in the script, the script is not of this audio
+MIN_SCRIPT_MATCH = 0.5
+
+
+def _key(text: str) -> str:
+    return re.sub(r"[^\w]+", "", text.lower().replace("’", "'").replace("'", ""))
+
+
+def _has_digit(text: str) -> bool:
+    return any(ch.isdigit() for ch in text)
+
+
+def _script_tokens(script_text: str) -> list[str]:
+    """The script's spoken words as written, punctuation attached; a dash or other
+    mark standing alone joins the word before it."""
+    tokens: list[str] = []
+    for token in spoken(script_text).split():
+        if _key(token) or not tokens:
+            tokens.append(token)
+        else:
+            tokens[-1] += token if token[0] in ".,!?;:…" else " " + token
+    return [t for t in tokens if _key(t)]
+
+
+def align_to_script(words: list[Word], script_text: str | None) -> tuple[list[Word], int]:
+    """Spells the transcript the way the script does, keeping Whisper's timings.
+    Whisper's words are matched to the script's (difflib, like the fan-wiki
+    transcripts); a word or short stretch heard differently - "Ang" for "Aang",
+    "Bass Sing Say" for "Ba Sing Se" - takes the script's words, spread over the time
+    Whisper heard them in. Where the audio says something the script does not, or
+    leaves a part out, Whisper's words stay. Returns the words and how many changed;
+    a script that does not match the audio is not used at all."""
+    import difflib
+
+    tokens = _script_tokens(script_text or "")
+    if not tokens or not words:
+        return words, 0
+    heard = [_key(w.text) for w in words]
+    written = [_key(t) for t in tokens]
+    matcher = difflib.SequenceMatcher(None, heard, written, autojunk=False)
+    blocks = matcher.get_opcodes()
+    matched = sum(i2 - i1 for tag, i1, i2, _, _ in blocks if tag == "equal")
+    if matched < MIN_SCRIPT_MATCH * len(words):
+        logger.info("script matches only %d of %d words heard - not used", matched, len(words))
+        return words, 0
+
+    result: list[Word] = []
+    changed = 0
+    for tag, i1, i2, j1, j2 in blocks:
+        if tag == "equal" or (tag == "replace" and i2 - i1 == j2 - j1 <= MAX_RETIMED_WORDS):
+            # the same words (or as many, heard wrong): the script's spelling, Whisper's times
+            for w, token in zip(words[i1:i2], tokens[j1:j2]):
+                if _has_digit(w.text):
+                    result.append(w)  # "61", not the "sixty-one" a script for the voice spells out
+                    continue
+                changed += w.text != token
+                result.append(Word(text=token, start=w.start, end=w.end))
+        elif (
+            tag == "replace"
+            and i2 - i1 <= MAX_RETIMED_WORDS
+            and j2 - j1 <= MAX_RETIMED_WORDS
+            and not any(_has_digit(w.text) for w in words[i1:i2])
+        ):
+            # as many words heard as a different number written: the script's words,
+            # sharing the time by their length
+            start, end = words[i1].start, words[i2 - 1].end
+            lengths = [len(_key(t)) or 1 for t in tokens[j1:j2]]
+            at = start
+            for token, length in zip(tokens[j1:j2], lengths):
+                step = (end - start) * length / sum(lengths)
+                result.append(Word(text=token, start=round(at, 3), end=round(at + step, 3)))
+                at += step
+            changed += max(i2 - i1, j2 - j1)
+        elif tag in ("replace", "delete"):
+            result.extend(words[i1:i2])  # said, though not in the script
+        # "insert": in the script, never said - nothing to time it by
+    return result, changed
+
+
 def run_transcribe(project_id: str, report: Report) -> None:
     from app.pipeline.stages.transcribe import _whisper_model
 
@@ -132,6 +215,10 @@ def run_transcribe(project_id: str, report: Report) -> None:
     if not words:
         raise RuntimeError("No speech found in the audio")
     words = _redo_stuck(model, audio_path, words, report)
+    if project.script_text:
+        report("matching the transcript to the script")
+        words, changed = align_to_script(words, project.script_text)
+        logger.info("transcript of %s: %d words spelled as in the script", project_id, changed)
 
     store.save_words(project_id, words)
 

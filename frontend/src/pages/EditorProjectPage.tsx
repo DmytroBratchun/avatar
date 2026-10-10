@@ -248,7 +248,15 @@ function BeatRow({
         <td style={{ verticalAlign: "top" }}>
           <div style={{ display: "flex", gap: "0.3rem", flexWrap: "wrap" }}>
             {beat.slots.map((s, i) => (
-              <SlotThumb key={i} projectId={projectId} slot={s} active={openSlot === i} onClick={() => setOpenSlot(openSlot === i ? null : i)} />
+              <SlotThumb
+                key={i}
+                projectId={projectId}
+                beatId={beat.id}
+                slotIndex={i}
+                slot={s}
+                active={openSlot === i}
+                onClick={() => setOpenSlot(openSlot === i ? null : i)}
+              />
             ))}
             {beat.backgrounds.length > 0 && (
               <div style={{ width: "64px", marginLeft: "0.4rem", opacity: 0.75 }} title={`Background: ${beat.background_query}`}>
@@ -532,6 +540,7 @@ export default function EditorProjectPage() {
             {t.label}
           </button>
         ))}
+        <div className="tabs-actions">{renderButton}</div>
       </div>
 
       {/* what is running or went wrong is shown on every tab */}
@@ -561,50 +570,6 @@ export default function EditorProjectPage() {
       {tab === "pipeline" && (
         <>
           <div className="card">
-            <h3>Narration</h3>
-            {project.audio_file ? (
-              <audio controls src={api.editorAudioUrl(project.id)} style={{ width: "100%" }} />
-            ) : (
-              <p className="hint">No audio yet.</p>
-            )}
-            <div style={{ marginTop: "0.5rem" }}>
-              <label style={{ fontSize: "0.8rem" }}>{project.audio_file ? "Replace audio" : "Add audio"}</label>
-              <input
-                type="file"
-                accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg"
-                disabled={busy}
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) uploadMutation.mutate(file);
-                }}
-              />
-              {project.audio_file && (
-                <p className="hint" style={{ marginTop: "0.3rem", marginBottom: 0 }}>
-                  Replacing the audio discards the transcript, quotes and beats.
-                </p>
-              )}
-            </div>
-          </div>
-
-          <FootageNotesCard
-            key={`${project.id}-visual`}
-            project={project}
-            field="visual_notes"
-            title="Visual wishes"
-            hint="How you want the video to look, in your own words - Shot queries and Background follow it. Takes effect the next time they run."
-            placeholder="More close-ups of faces. Fights over people talking."
-            onChange={setProject}
-          />
-          <FootageNotesCard
-            key={`${project.id}-footage`}
-            project={project}
-            field="footage_notes"
-            title="Footage prompt"
-            hint={'Where the script\'s material comes from - Shot queries reads this and looks for each shot where its story is. For example: "Keung and June are from the comic The Bounty Hunter and the Tea Brewer. The part about the tea shop in Ba Sing Se is from The Promise." Takes effect the next time Shot queries runs.'}
-            onChange={setProject}
-          />
-
-          <div className="card" style={{ marginTop: "0.75rem" }}>
             <h3>Stages</h3>
             <p className="hint" style={{ marginTop: 0 }}>
               Hover a name to see what the stage does. Running a stage while another is working puts it in the queue.
@@ -641,8 +606,12 @@ export default function EditorProjectPage() {
                 job={project.job?.stage === stage.key ? project.job : null}
                 eta={project.job?.stage === stage.key ? eta : null}
                 queuePosition={project.queue.indexOf(stage.key) + 1}
-                // when something is running or queued, what this stage needs may be on its way
-                canRun={!!project.audio_file && (stage.ready || running || project.queue.length > 0)}
+                // when something is running or queued, what this stage needs may be on its way -
+                // the narration too, while the voice-over is being made (it becomes the narration)
+                canRun={
+                  (!!project.audio_file || (running && project.job?.stage === "voiceover")) &&
+                  (stage.ready || running || project.queue.length > 0)
+                }
                 somethingRunning={running}
                 onRun={() =>
                   (stage.key === "queries" || stage.key === "select") && lockedCount > 0
@@ -653,6 +622,24 @@ export default function EditorProjectPage() {
               />
             ))}
           </div>
+
+          <FootageNotesCard
+            key={`${project.id}-visual`}
+            project={project}
+            field="visual_notes"
+            title="Visual wishes"
+            hint="How you want the video to look, in your own words - Shot queries and Background follow it. Takes effect the next time they run."
+            placeholder="More close-ups of faces. Fights over people talking."
+            onChange={setProject}
+          />
+          <FootageNotesCard
+            key={`${project.id}-footage`}
+            project={project}
+            field="footage_notes"
+            title="Footage prompt"
+            hint={'Where the script\'s material comes from - Shot queries reads this and looks for each shot where its story is. For example: "Keung and June are from the comic The Bounty Hunter and the Tea Brewer. The part about the tea shop in Ba Sing Se is from The Promise." Takes effect the next time Shot queries runs.'}
+            onChange={setProject}
+          />
         </>
       )}
 
@@ -674,7 +661,38 @@ export default function EditorProjectPage() {
         />
       )}
 
-      {tab === "voice" && <VoiceoverCard project={project} disabled={busy} onChange={setProject} />}
+      {tab === "voice" && (
+        <>
+            <div className="card">
+              <h3>Narration audio</h3>
+              {project.audio_file ? (
+                <audio controls src={api.editorAudioUrl(project.id)} style={{ width: "100%" }} />
+              ) : (
+                <p className="hint">No audio yet.</p>
+              )}
+              <div style={{ marginTop: "0.5rem" }}>
+                <label style={{ fontSize: "0.8rem" }}>{project.audio_file ? "Replace audio" : "Add audio"}</label>
+                <input
+                  type="file"
+                  accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg"
+                  disabled={busy}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) uploadMutation.mutate(file);
+                  }}
+                />
+                {project.audio_file && (
+                  <p className="hint" style={{ marginTop: "0.3rem", marginBottom: 0 }}>
+                    Replacing the audio discards the transcript, quotes and beats.
+                  </p>
+                )}
+              </div>
+            </div>
+          <div style={{ marginTop: "0.75rem" }}>
+            <VoiceoverCard project={project} disabled={busy} onChange={setProject} />
+          </div>
+        </>
+      )}
 
       {tab === "quotes" && (
         <>
@@ -748,7 +766,6 @@ export default function EditorProjectPage() {
           <div className="look-layout">
             <div>
               <RenderSettingsCard project={project} disabled={busy} format={lookFormat} onFormat={setLookFormat} onChange={setProject} />
-              <div style={{ marginTop: "0.75rem" }}>{renderButton}</div>
             </div>
             <LookPreview project={project} format={lookFormat} onFormat={setLookFormat} />
           </div>
@@ -789,7 +806,6 @@ export default function EditorProjectPage() {
           ) : (
             <p className="hint">Not rendered yet.</p>
           )}
-          {renderButton}
           {photoCredits.length > 0 && (
             <div style={{ marginTop: "1rem" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>

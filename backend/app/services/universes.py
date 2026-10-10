@@ -39,6 +39,10 @@ class Universe(BaseModel):
     # footage is looked for in the shows, and in a comic only where the narration
     # is about that comic
     comics: list[str] = Field(default_factory=list)
+    # shows whose footage may only appear as still frames - a copyrighted series whose
+    # video must not be reused: the editor shows a frame of it with a slow camera move
+    # instead of the clip, never puts it behind the frame and never quotes it
+    still_shows: list[str] = Field(default_factory=list)
     # what this world's music sounds like - instruments, traditions, character - for
     # composing music under a video; empty = left to what the model knows of the shows
     music_style: str = ""
@@ -140,3 +144,8 @@ def universe_for_show(show_title: str | None) -> Universe:
             return universe
     title = show_title or "this show"
     return Universe(id="", name=title, shows=[show_title] if show_title else [])
+
+
+def still_shows() -> set[str]:
+    """Every show, in any universe, that may only be shown as still frames."""
+    return {show for universe in _load() for show in universe.still_shows}

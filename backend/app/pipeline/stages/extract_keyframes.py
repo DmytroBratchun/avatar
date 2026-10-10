@@ -3,7 +3,7 @@ import subprocess
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import KEYFRAMES_DIR, settings
+from app.config import KEYFRAMES_DIR, settings, stored_path
 from app.db.models import Scene, Source
 
 
@@ -63,7 +63,7 @@ def run_keyframe_extraction(db: Session, source: Source) -> None:
             timestamp = scene.start_time + duration * offset
             out_path = str(KEYFRAMES_DIR / f"scene_{scene.id}_{j}.jpg")
             _extract_frame(source.file_path, timestamp, out_path)
-            paths.append(out_path)
+            paths.append(stored_path(out_path))
         scene.keyframe_paths = paths
         source.current_stage_detail = f"extracting keyframes {i + 1}/{total}"
         db.commit()

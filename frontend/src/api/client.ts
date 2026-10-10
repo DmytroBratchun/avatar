@@ -209,6 +209,8 @@ export interface UniverseOut {
   available_shows: string[];
   // its comic series
   comics?: string[];
+  // shows whose footage the video may only show as still frames (copyright)
+  still_shows?: string[];
 }
 
 export interface EditorWord {
@@ -246,6 +248,8 @@ export interface EditorCandidate {
   visual_score: number | null;
   score: number;
   slivers?: number;
+  // a still's frame picked by hand (seconds in the file); null = the scene's keyframe
+  still_at?: number | null;
 }
 
 export interface EditorSlot {
@@ -717,7 +721,12 @@ export const api = {
   getEditorTranscript: (id: string) => request<EditorWord[]>(`/api/editor/projects/${id}/transcript`),
   unqueueEditorStage: (id: string, stage: EditorStage) =>
     request<EditorProject>(`/api/editor/projects/${id}/queue/${stage}`, { method: "DELETE" }),
-  updateEditorSlot: (id: string, beatId: string, slotIndex: number, payload: { selected?: number; locked?: boolean }) =>
+  updateEditorSlot: (
+    id: string,
+    beatId: string,
+    slotIndex: number,
+    payload: { selected?: number; locked?: boolean; still_at?: number | null },
+  ) =>
     request<EditorProject>(`/api/editor/projects/${id}/beats/${beatId}/slots/${slotIndex}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
@@ -802,4 +811,8 @@ export const api = {
 
   streamUrl: (sourceId: number) => `${BASE_URL}/api/media/${sourceId}/stream`,
   keyframeUrl: (sceneId: number, index: number) => `${BASE_URL}/api/media/scenes/${sceneId}/keyframes/${index}`,
+  frameUrl: (sourceId: number, t: number, width = 320) => `${BASE_URL}/api/media/${sourceId}/frame?t=${t.toFixed(3)}&width=${width}`,
+  // the frame a candidate shows as a still; `version` changes the URL when the pick changes
+  candidateStillUrl: (id: string, beatId: string, slotIndex: number, index: number, version: string, width = 720) =>
+    `${BASE_URL}/api/editor/projects/${id}/beats/${beatId}/slots/${slotIndex}/candidates/${index}/still?width=${width}&v=${encodeURIComponent(version)}`,
 };

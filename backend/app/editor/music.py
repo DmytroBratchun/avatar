@@ -20,6 +20,7 @@ a block looks there before it orders anything.
 
 import hashlib
 import json
+import logging
 import math
 import re
 import subprocess
@@ -34,6 +35,8 @@ from app.editor import music_library, store
 from app.editor.llm import run_claude_json
 from app.editor.store import MusicBlock, MusicTrack, Project, project_shows, project_universe
 from app.services.lumean import Lumean, LumeanError
+
+logger = logging.getLogger(__name__)
 
 FOLDER = "music"
 TRACK_MS = 30_000  # the longest track Lumean makes
@@ -452,43 +455,54 @@ def compose(project_id: str, report) -> None:
             )
         return
 
-    client = Lumean()
-    in_flight: dict[str, str] = {}  # block id -> order id
-    attempts: dict[str, int] = {}
-    deadline = time.monotonic() + MAX_WAIT_SECONDS
-    while True:
-        lacking = [b for b in blocks if covered(b) < needed(b)]
-        for block in lacking:
-            if len(in_flight) >= PARALLEL_ORDERS:
-                break
-            if block.id in in_flight or attempts.get(block.id, 0) >= ATTEMPTS_PER_BLOCK:
-                continue
-            missing = needed(block) - covered(block)
-            variants = min(VARIANTS_PER_ORDER, max(1, math.ceil(missing / (EXPECTED_USABLE - OVERLAP))))
-            try:
-                order = client.create_music_order(block.prompt, variants, TRACK_MS)
-            except LumeanError as exc:
-                if exc.reason == "concurrency_limit_exceeded" and in_flight:
-                    break  # the account is busy with our own orders: wait for one
-                raise RuntimeError(f"Music for block {block.id[-2:]} ({block.mood}): {exc}") from exc
-            in_flight[block.id] = order["id"]
-            attempts[block.id] = attempts.get(block.id, 0) + 1
+    # If Lumean fails - an error, nothing back, out of time - the closest tracks of
+    # the library fill what it could not, and the stage fails only when those run out.
+    failure: str | None = None
+    try:
+        client = Lumean()
+        in_flight: dict[str, str] = {}  # block id -> order id
+        attempts: dict[str, int] = {}
+        deadline = time.monotonic() + MAX_WAIT_SECONDS
+        while True:
+            lacking = [b for b in blocks if covered(b) < needed(b)]
+            for block in lacking:
+                if len(in_flight) >= PARALLEL_ORDERS:
+                    break
+                if block.id in in_flight or attempts.get(block.id, 0) >= ATTEMPTS_PER_BLOCK:
+                    continue
+                missing = needed(block) - covered(block)
+                variants = min(VARIANTS_PER_ORDER, max(1, math.ceil(missing / (EXPECTED_USABLE - OVERLAP))))
+                try:
+                    order = client.create_music_order(block.prompt, variants, TRACK_MS)
+                except LumeanError as exc:
+                    if exc.reason == "concurrency_limit_exceeded" and in_flight:
+                        break  # the account is busy with our own orders: wait for one
+                    raise RuntimeError(f"Music for block {block.id[-2:]} ({block.mood}): {exc}") from exc
+                in_flight[block.id] = order["id"]
+                attempts[block.id] = attempts.get(block.id, 0) + 1
 
-        filled = sum(1 for b in blocks if covered(b) >= needed(b))
-        report(f"composing music {filled}/{len(blocks)}")
-        if not in_flight:
-            break
-        if time.monotonic() > deadline:
-            raise RuntimeError("Lumean is still composing - run the music stage again later")
-        time.sleep(POLL_SECONDS)
-        for block_id, order_id in list(in_flight.items()):
-            order = client.order(order_id)
-            if order.get("status") in ("created", "pending", "in_progress"):
-                continue
-            del in_flight[block_id]
-            block = next(b for b in blocks if b.id == block_id)
-            if _collect(client, order, block, out, project):
-                _save(project_id, blocks)
+            filled = sum(1 for b in blocks if covered(b) >= needed(b))
+            report(f"composing music {filled}/{len(blocks)}")
+            if not in_flight:
+                break
+            if time.monotonic() > deadline:
+                raise RuntimeError("Lumean is still composing - run the music stage again later")
+            time.sleep(POLL_SECONDS)
+            for block_id, order_id in list(in_flight.items()):
+                order = client.order(order_id)
+                if order.get("status") in ("created", "pending", "in_progress"):
+                    continue
+                del in_flight[block_id]
+                block = next(b for b in blocks if b.id == block_id)
+                if _collect(client, order, block, out, project):
+                    _save(project_id, blocks)
+    except Exception as exc:
+        logger.warning("Composing music for project %s failed: %s", project_id, exc)
+        failure = str(exc) or exc.__class__.__name__
+    if any(covered(b) < needed(b) for b in blocks):
+        report("taking the closest tracks from the music library")
+        if _from_library(project, blocks, out, only=True):
+            _save(project_id, blocks)
 
     unfilled = [b for b in blocks if covered(b) < needed(b)]
     music_library.forget_project(project_id, {music_library.library_id(t, out) for b in blocks for t in b.tracks})
@@ -502,4 +516,8 @@ def compose(project_id: str, report) -> None:
                 pass
     if unfilled:
         names = ", ".join(f"{b.id[-2:]} ({b.mood})" for b in unfilled)
-        raise RuntimeError(f"Could not get enough music for block {names} - reword its prompt or run the stage again")
+        reason = f"{failure}. " if failure else ""
+        raise RuntimeError(
+            f"{reason}Could not get enough music for block {names}, and the music library has nothing close enough "
+            "- reword its prompt or run the stage again"
+        )

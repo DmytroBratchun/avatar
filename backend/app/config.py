@@ -1,9 +1,21 @@
+import os
 from pathlib import Path
 
+from dotenv import dotenv_values
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BACKEND_DIR / "data"
+
+
+def _data_dir() -> Path:
+    """Where the index lives - the database, keyframes, audio, comic pages, caches:
+    DATA_DIR from the environment or backend/.env, else backend/data. Kept apart
+    from the code; files in it are stored relative to it (see data_path)."""
+    value = os.environ.get("DATA_DIR") or dotenv_values(BACKEND_DIR / ".env").get("DATA_DIR")
+    return Path(value).expanduser().resolve() if value else BACKEND_DIR / "data"
+
+
+DATA_DIR = _data_dir()
 KEYFRAMES_DIR = DATA_DIR / "keyframes"
 AUDIO_DIR = DATA_DIR / "audio"
 
@@ -34,6 +46,22 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def data_path(stored: str | Path) -> Path:
+    """A file the app made in DATA_DIR, as the database or a project stores it:
+    relative to DATA_DIR. (A path stored absolute is taken as it is.)"""
+    path = Path(stored)
+    return path if path.is_absolute() else DATA_DIR / path
+
+
+def stored_path(path: str | Path) -> str:
+    """How a file inside DATA_DIR is stored: relative to it, with forward slashes,
+    so the folder can be moved by changing DATA_DIR alone."""
+    try:
+        return Path(path).resolve().relative_to(DATA_DIR.resolve()).as_posix()
+    except ValueError:
+        return str(path)
 
 for directory in (DATA_DIR, KEYFRAMES_DIR, AUDIO_DIR):
     directory.mkdir(parents=True, exist_ok=True)

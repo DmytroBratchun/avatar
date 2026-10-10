@@ -115,6 +115,11 @@ def _key(slot: Slot) -> str:
 
 
 def _candidate(db: Session, scene: Scene, source: Source, at: float, duration: float) -> Candidate:
+    if source.kind == "comic":
+        # a moment found on a page of a comic: the page, shown as any other page is
+        from app.editor.comic_pages import page_candidate
+
+        return page_candidate(scene, source, duration, MOMENT_SCORE)
     start, end = _clip_window(db, scene, source, duration, False, anchor=at)
     return Candidate(
         scene_id=scene.id,

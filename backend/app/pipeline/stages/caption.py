@@ -11,7 +11,7 @@ from pathlib import Path
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from app.config import BACKEND_DIR, settings
+from app.config import data_path, settings
 from app.db.models import Scene, Source, TranscriptLine
 from app.services.runtime_settings import (
     api_model,
@@ -305,7 +305,7 @@ def caption_scene_via_api(
         primer = f"{primer}\n\n{tag_hint}"
     content = [
         {"type": "text", "text": primer, "cache_control": {"type": "ephemeral"}},
-        *[_image_block(p) for p in scene.keyframe_paths],
+        *[_image_block(str(data_path(p))) for p in scene.keyframe_paths],
         {
             "type": "text",
             "text": _context_block(source, scene, transcript_text)
@@ -347,7 +347,7 @@ def caption_scene_via_claude_code(
 ) -> tuple[dict, float | None]:
     # absolute: the call runs outside the repo (see cwd below), where a path relative
     # to the backend folder would not be found
-    images = [(BACKEND_DIR / p).resolve() for p in scene.keyframe_paths]
+    images = [data_path(p).resolve() for p in scene.keyframe_paths]
     image_list = "\n".join(f"- {p}" for p in images)
     prompt = (
         f"{_episode_primer(source)}\n\n"
@@ -415,7 +415,7 @@ def caption_scene_via_local(source: Source, scene: Scene, transcript_text: str, 
     if tag_hint:
         primer = f"{primer}\n\n{tag_hint}"
     prompt = f"{primer}\n\n{LOCAL_INSTRUCTION_TEXT}\n\nDialogue during this scene:\n{transcript_text or '(no dialogue)'}"
-    images = [base64.standard_b64encode(Path(p).read_bytes()).decode() for p in scene.keyframe_paths]
+    images = [base64.standard_b64encode(data_path(p).read_bytes()).decode() for p in scene.keyframe_paths]
 
     try:
         response = httpx.post(

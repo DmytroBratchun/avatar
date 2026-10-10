@@ -67,7 +67,7 @@ class Candidate(BaseModel):
     source_id: int
     file_path: str
     # "video", or "comic": a page of a comic, shown scrolling down the screen. For a
-    # page, image_path is its picture and scene_start its number counted from 0;
+    # page, image_path is its picture (relative to DATA_DIR) and scene_start its number counted from 0;
     # clip_start/clip_end only carry the slot's length.
     kind: str = "video"
     image_path: str | None = None
@@ -94,6 +94,9 @@ class Candidate(BaseModel):
     # words, which can leave a flash of the neighbouring shot (see render._quote_holds)
     hold_start: float = 0.0
     hold_end: float = 0.0
+    # for footage of a show that may only be shown as stills: the frame to show
+    # (seconds in the file), picked by the user; None = the scene's keyframe
+    still_at: float | None = None
 
 
 class Slot(BaseModel):

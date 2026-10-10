@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.config import DATA_DIR, data_path
 from app.db.models import Scene, Source
 from app.db.session import get_db
 
@@ -53,6 +54,40 @@ def stream_source(source_id: int, request: Request, db: Session = Depends(get_db
     return StreamingResponse(iterator(), status_code=206, media_type=media_type, headers=headers)
 
 
+FRAME_CACHE_DIR = DATA_DIR / "frame_cache"
+
+
+def frame_jpeg(video_path: str, at: float, width: int) -> Path:
+    """One frame of a video as a JPEG of the given width, cached on disk."""
+    import hashlib
+    import subprocess
+
+    width = max(160, min(1920, width // 2 * 2))
+    key = hashlib.sha1(f"{video_path}|{at:.3f}|{width}".encode()).hexdigest()[:20]
+    path = FRAME_CACHE_DIR / f"{key}.jpg"
+    if not path.exists():
+        FRAME_CACHE_DIR.mkdir(exist_ok=True)
+        partial = path.with_suffix(".part.jpg")
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{max(0.0, at):.3f}", "-i", video_path,
+             "-frames:v", "1", "-vf", f"scale={width}:-2", "-q:v", "3", str(partial)],
+            capture_output=True,
+        )
+        if result.returncode != 0 or not partial.exists():
+            raise HTTPException(500, "Could not read that frame")
+        partial.replace(path)
+    return path
+
+
+@router.get("/{source_id}/frame")
+def get_frame(source_id: int, t: float, width: int = 640, db: Session = Depends(get_db)):
+    """The frame of a source at t seconds (for picking the frame a still shows)."""
+    source = db.get(Source, source_id)
+    if source is None or not Path(source.file_path).exists():
+        raise HTTPException(404, "Source not found")
+    return FileResponse(frame_jpeg(source.file_path, t, width), media_type="image/jpeg")
+
+
 @router.get("/scenes/{scene_id}/keyframes/{index}")
 def get_keyframe(scene_id: int, index: int, db: Session = Depends(get_db)):
     scene = db.get(Scene, scene_id)
@@ -60,7 +95,7 @@ def get_keyframe(scene_id: int, index: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "Scene not found")
     if index < 0 or index >= len(scene.keyframe_paths):
         raise HTTPException(404, "Keyframe index out of range")
-    path = Path(scene.keyframe_paths[index])
+    path = data_path(scene.keyframe_paths[index])
     if not path.exists():
         raise HTTPException(404, "Keyframe file missing on disk")
     return FileResponse(path, media_type="image/jpeg")

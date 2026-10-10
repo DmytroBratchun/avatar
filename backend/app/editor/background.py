@@ -12,12 +12,14 @@ from PIL import Image, ImageStat
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from app.config import data_path
 from app.db.models import Scene, Shot, Source
 from app.editor.bgtrack import FADE_FRAMES, FPS, clip_frames
 from app.editor.llm import run_claude_json
 from app.editor.store import Background, Project, project_shows, project_universe
 from app.pipeline.stages.extract_keyframes import _OFFSETS_BY_COUNT
 from app.services.embeddings import embed_text_for_visual_search
+from app.services.universes import still_shows
 from app.vectorstore.sqlite_vec_client import knn_visual
 
 # Share of scenes, ranked by how much more they look like scenery than like
@@ -114,7 +116,7 @@ def _too_dark(scene: Scene) -> bool:
     """Night shots and fades score as 'empty scenery' but come out as a plain black
     background once blurred and dimmed."""
     try:
-        with Image.open(scene.keyframe_paths[0]) as image:
+        with Image.open(data_path(scene.keyframe_paths[0])) as image:
             return ImageStat.Stat(image.convert("L").resize((64, 48))).mean[0] < MIN_BRIGHTNESS
     except OSError:
         return False
@@ -155,7 +157,12 @@ def write_background_queries(project: Project, cwd) -> float:
 
 def choose_backgrounds(db: Session, project: Project, report) -> None:
     report("finding calm scenery in the index")
-    scenic_ids = scenic_scene_ids(db, project_shows(project))
+    # scenery is moving footage: a show that may only be shown as stills gives none
+    stills = still_shows()
+    shows = [show for show in project_shows(project) if show not in stills]
+    if not shows:
+        raise RuntimeError("This project's shows may only be shown as stills - none can give moving scenery")
+    scenic_ids = scenic_scene_ids(db, shows)
     if not scenic_ids:
         raise RuntimeError("No scenes with a visual index to use as backgrounds")
 

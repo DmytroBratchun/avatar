@@ -99,11 +99,27 @@ def _encode(frames: int) -> list[str]:
     ]
 
 
-def pieces(placed: list[Placed], source_crop, parts_dir: Path, speed: float = 1.0) -> list[tuple[Path, list[str]]]:
-    """(file, ffmpeg args) for every piece of the track, in playing order."""
+def _blank(frames: int) -> tuple[dict, list[str]]:
+    """A stretch of the track nothing shows: black, which costs next to nothing to encode."""
+    return (
+        {"v": TRACK_VERSION, "blank": frames},
+        ["-f", "lavfi", "-i", f"color=black:s={TRACK_WIDTH}x{TRACK_HEIGHT}:r={FPS_NUM}/{FPS_DEN}",
+         "-vf", "setsar=1", *_encode(frames)],
+    )
+
+
+def pieces(
+    placed: list[Placed], source_crop, parts_dir: Path, speed: float = 1.0, shown: list[tuple[int, int]] | None = None,
+) -> list[tuple[Path, list[str]]]:
+    """(file, ffmpeg args) for every piece of the track, in playing order. With
+    `shown` (frame ranges [start, end) where some clip lets the background show),
+    a piece outside all of them is black instead of scenery: the track keeps its
+    length and timing, but only what is seen is encoded from the episodes."""
     result: list[tuple[Path, list[str]]] = []
 
-    def piece(identity: dict, args: list[str]) -> None:
+    def piece(identity: dict, args: list[str], start: int, frames: int) -> None:
+        if shown is not None and not any(s < start + frames and e > start for s, e in shown):
+            identity, args = _blank(frames)
         name = hashlib.sha1(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
         result.append((parts_dir / f"{name}.mp4", args))
 
@@ -116,6 +132,7 @@ def pieces(placed: list[Placed], source_crop, parts_dir: Path, speed: float = 1.
         piece(
             {"v": TRACK_VERSION, "alone": [p.clip.file_path, p.clip.clip_start, head, alone, p.hold], "crop": crop, "speed": speed},
             ["-ss", f"{p.clip.clip_start + head / FPS * speed:.3f}", "-i", p.clip.file_path, "-vf", graph, *_encode(alone)],
+            p.start + head, alone,
         )
         if tail:
             following = placed[i + 1]
@@ -137,5 +154,6 @@ def pieces(placed: list[Placed], source_crop, parts_dir: Path, speed: float = 1.
                     "-ss", f"{following.clip.clip_start:.3f}", "-i", following.clip.file_path,
                     "-filter_complex", graph, "-map", "[out]", *_encode(FADE_FRAMES),
                 ],
+                p.start + p.frames - FADE_FRAMES, FADE_FRAMES,
             )
     return result

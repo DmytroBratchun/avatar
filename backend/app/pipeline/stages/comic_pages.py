@@ -1,6 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import stored_path
 from app.db.models import Scene, Source
 from app.services.comics import render_pages
 
@@ -30,7 +31,7 @@ def run_comic_pages(db: Session, source: Source) -> None:
                 # a page has no time: its place is its number, counted from 0
                 start_time=float(index),
                 end_time=float(index + 1),
-                keyframe_paths=[path],
+                keyframe_paths=[stored_path(path)],
             )
         )
     source.duration_seconds = None

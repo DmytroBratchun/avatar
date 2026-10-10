@@ -18,7 +18,8 @@ from app.editor.llm import run_claude_json
 
 TIMEOUT = 900
 # directions to the voice ([whispers]) and Lumean's silences ({{pause=1.5}})
-_UNSPOKEN = re.compile(r"\[[^\[\]\n]{1,80}\]|\{\{[^{}\n]{1,40}\}\}")
+# [whispers], {{pause}}, and SSML such as <break time="1s" />
+_UNSPOKEN = re.compile(r"\[[^\[\]\n]{1,80}\]|\{\{[^{}\n]{1,40}\}\}|<[^<>\n]{1,80}>")
 
 SCHEMA = {
     "type": "object",
