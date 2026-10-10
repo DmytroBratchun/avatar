@@ -482,6 +482,7 @@ export interface EditorProject {
   audio_duration: number | null;
   script_text: string | null;
   footage_notes?: string | null;
+  visual_notes?: string | null;
   unlock_before?: string[];
   shows: string[];
   settings: {
@@ -655,6 +656,7 @@ export const api = {
     universe: string;
     script_text?: string;
     footage_notes?: string;
+    visual_notes?: string;
     shows: string[];
     layout?: string;
   }) => request<EditorProject>("/api/editor/projects", { method: "POST", body: JSON.stringify(payload) }),
@@ -670,6 +672,7 @@ export const api = {
       title?: string;
       script_text?: string;
       footage_notes?: string;
+      visual_notes?: string;
       shows?: string[];
       layout?: string;
       search_mode?: string;
@@ -705,6 +708,12 @@ export const api = {
   // unlock: re-pick the clips the user locked too (shot queries, find footage)
   runEditorStage: (id: string, stage: EditorStage, unlock = false) =>
     request<EditorProject>(`/api/editor/projects/${id}/run/${stage}${unlock ? "?unlock=true" : ""}`, { method: "POST" }),
+  getDefaultVisualNotes: () => request<{ text: string }>("/api/editor/default-visual-notes"),
+  saveDefaultVisualNotes: (text: string) =>
+    request<{ text: string }>("/api/editor/default-visual-notes", { method: "PUT", body: JSON.stringify({ text }) }),
+  // queues every stage still to do, through the render; music only when asked (paid)
+  runEditorAll: (id: string, music = false) =>
+    request<EditorProject>(`/api/editor/projects/${id}/run-all${music ? "?music=true" : ""}`, { method: "POST" }),
   getEditorTranscript: (id: string) => request<EditorWord[]>(`/api/editor/projects/${id}/transcript`),
   unqueueEditorStage: (id: string, stage: EditorStage) =>
     request<EditorProject>(`/api/editor/projects/${id}/queue/${stage}`, { method: "DELETE" }),

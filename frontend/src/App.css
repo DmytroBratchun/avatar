@@ -981,3 +981,87 @@ label {
     padding-right: 0;
   }
 }
+/* the Videos list: one dot per step, filled when done */
+.project-progress {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.project-progress .dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+}
+.project-progress .dot.done {
+  background: var(--success);
+  border-color: var(--success);
+}
+.project-progress .hint {
+  margin-left: 0.3rem;
+}
+/* New video: optional parts folded away */
+.new-video-more {
+  margin-top: 0.75rem;
+}
+.new-video-more summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+/* forms with the label on the left of its field */
+.new-video-modal {
+  width: 820px;
+}
+.form-row {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+  margin-bottom: 0.85rem;
+}
+.form-row > label {
+  margin: 0;
+  padding-top: 0.4rem;
+}
+.form-row input:not([type="checkbox"]):not([type="radio"]):not([type="file"]) {
+  width: 100%;
+}
+.form-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  padding-top: 0.4rem;
+}
+.form-checks label,
+.form-inline-check {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin: 0;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.form-checks input,
+.form-inline-check input {
+  width: auto;
+  min-height: 0;
+}
+.form-inline-check {
+  margin-top: 0.4rem;
+}
+.tab-dot {
+  display: inline-block;
+  width: 0.4rem;
+  height: 0.4rem;
+  margin-left: 0.4rem;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+}
+@media (max-width: 560px) {
+  .form-row {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.25rem;
+  }
+}

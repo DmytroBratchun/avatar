@@ -298,6 +298,10 @@ class Project(BaseModel):
     # are from the comic The Bounty Hunter and the Tea Brewer") - read by the
     # shot-queries call, so a shot is looked for where its story actually is
     footage_notes: str | None = None
+    # the author's wishes for the picture, in their own words ("more close-ups of faces,
+    # fights over talk, no comic pages in the first minute") - read by the shot-queries
+    # and background calls
+    visual_notes: str | None = None
     # the fictional world this video is about; decides which shows it can use and
     # what the prompts say about the world. Empty on projects made before universes.
     universe: str = ""
@@ -398,6 +402,7 @@ def project_shows(project: "Project") -> list[str]:
 def create_project(
     title: str, script_text: str | None, shows: list[str], layout: str | None, universe: str = "",
     footage_notes: str | None = None,
+    visual_notes: str | None = None,
 ) -> Project:
     with _lock:
         root = root_dir()
@@ -417,6 +422,7 @@ def create_project(
             updated_at=created,
             script_text=script_text or None,
             footage_notes=(footage_notes or "").strip() or None,
+            visual_notes=(visual_notes or "").strip() or None,
             universe=universe,
             shows=shows,
             settings=default_settings(layout),

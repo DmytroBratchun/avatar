@@ -636,6 +636,12 @@ def run_queries(project_id: str, report: Report) -> None:
                 if project.footage_notes and project.footage_notes.strip()
                 else ""
             )
+            + (
+                "The author's wishes for the picture - follow them wherever the narration allows, "
+                "within the rules above:\n" + project.visual_notes.strip() + "\n\n"
+                if project.visual_notes and project.visual_notes.strip()
+                else ""
+            )
             + "Beats:\n" + "\n".join(lines)
         )
         report(f"writing shot queries for beats {window_start + 1}-{window_start + len(window)} of {len(beats)}")

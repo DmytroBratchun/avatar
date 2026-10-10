@@ -14,6 +14,8 @@ from app.services.runtime_settings import (
     editor_projects_root,
     set_editor_default_look,
     set_editor_default_voice,
+    editor_default_visual_notes,
+    set_editor_default_visual_notes,
     set_editor_projects_root,
 )
 
@@ -36,6 +38,7 @@ class ProjectCreateIn(BaseModel):
     title: str
     script_text: str | None = None
     footage_notes: str | None = None
+    visual_notes: str | None = None
     universe: str = ""
     shows: list[str] = []
     layout: str | None = None  # None = the saved default look's layout
@@ -50,6 +53,7 @@ class ProjectUpdateIn(BaseModel):
     title: str | None = None
     script_text: str | None = None
     footage_notes: str | None = None
+    visual_notes: str | None = None
     shows: list[str] | None = None
     layout: str | None = None
     search_mode: str | None = None
@@ -119,7 +123,8 @@ def create_project(payload: ProjectCreateIn) -> Project:
         raise HTTPException(400, f"Unknown layout: {payload.layout}")
     try:
         return store.create_project(
-            title, payload.script_text, payload.shows, payload.layout, payload.universe, payload.footage_notes
+            title, payload.script_text, payload.shows, payload.layout, payload.universe, payload.footage_notes,
+            payload.visual_notes,
         )
     except store.RootNotConfigured:
         raise HTTPException(409, "Editor projects folder is not set")
@@ -146,6 +151,8 @@ def update_project(project_id: str, payload: ProjectUpdateIn) -> Project:
             p.script_text = data["script_text"] or None
         if "footage_notes" in data:
             p.footage_notes = (data["footage_notes"] or "").strip() or None
+        if "visual_notes" in data:
+            p.visual_notes = (data["visual_notes"] or "").strip() or None
         if data.get("shows") is not None:
             p.shows = data["shows"]
         if data.get("layout"):
@@ -301,6 +308,42 @@ def run_stage(project_id: str, stage: str, unlock: bool = False) -> Project:
         raise HTTPException(404, f"Unknown stage: {stage}")
 
 
+def remaining_stages(project: Project, music: bool) -> list[str]:
+    """The stages "Run to the end" queues: from the first one whose output is missing,
+    every one after it too (each builds on the one before), then the render. Quotes
+    are left out - they wait for the user's approval anyway - and so is music unless
+    asked for, as it places paid orders."""
+    from app.editor.music import blocks_fit
+
+    slots = [slot for beat in project.beats for slot in beat.slots]
+    done = {
+        "transcribe": project.word_count > 0,
+        "beats": bool(project.beats),
+        "queries": bool(slots) and all(slot.text_query or slot.visual_query or slot.photo_query for slot in slots),
+        "select": bool(slots) and all(slot.selected is not None for slot in slots),
+        "background": project.settings.layout != "framed" or (bool(project.beats) and all(b.backgrounds for b in project.beats)),
+    }
+    order = ["transcribe", "beats", "queries", "select", "background"]
+    first = next((n for n, stage in enumerate(order) if not done[stage]), len(order))
+    stages = [s for s in order[first:] if s != "background" or project.settings.layout == "framed"]
+    if music and (stages or not blocks_fit(project) or any(not any(t.enabled for t in b.tracks) for b in project.music)):
+        stages.append("music")
+    return [*stages, "render"]
+
+
+@router.post("/projects/{project_id}/run-all", response_model=Project)
+def run_all(project_id: str, music: bool = False) -> Project:
+    """Queues every stage still to do, through the render (remaining_stages)."""
+    project = _load(project_id)
+    if not project.audio_file:
+        raise HTTPException(400, "Add the narration first - upload it or voice the script")
+    if music and not current_lumean_api_key():
+        raise HTTPException(400, "Add the Lumean API key in Settings first")
+    for stage in remaining_stages(project, music):
+        project = jobs.start(project_id, stage)
+    return project
+
+
 @router.delete("/projects/{project_id}/queue/{stage}", response_model=Project)
 def unqueue_stage(project_id: str, stage: str) -> Project:
     """Takes a waiting stage off the project's queue (the running one is not affected)."""
@@ -388,6 +431,22 @@ def prepare_voice_text(payload: VoiceTextIn) -> dict:
     except (RuntimeError, subprocess.TimeoutExpired) as exc:
         raise HTTPException(502, f"Could not prepare the script: {exc}")
     return {"text": text, "changes": changes, "cost_usd": cost}
+
+
+class VisualNotesIn(BaseModel):
+    text: str
+
+
+@router.get("/default-visual-notes")
+def get_default_visual_notes() -> dict:
+    """The visual wishes a new video starts with - the ones last saved as default."""
+    return {"text": editor_default_visual_notes()}
+
+
+@router.put("/default-visual-notes")
+def save_default_visual_notes(payload: VisualNotesIn) -> dict:
+    set_editor_default_visual_notes(payload.text.strip())
+    return {"text": editor_default_visual_notes()}
 
 
 @router.get("/voiceover/default-voice", response_model=voiceover.VoiceSettings)

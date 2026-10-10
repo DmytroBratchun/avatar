@@ -586,7 +586,23 @@ export default function EditorProjectPage() {
             </div>
           </div>
 
-          <FootageNotesCard key={project.id} project={project} onChange={setProject} />
+          <FootageNotesCard
+            key={`${project.id}-visual`}
+            project={project}
+            field="visual_notes"
+            title="Visual wishes"
+            hint="How you want the video to look, in your own words - Shot queries and Background follow it. Takes effect the next time they run."
+            placeholder="More close-ups of faces. Fights over people talking."
+            onChange={setProject}
+          />
+          <FootageNotesCard
+            key={`${project.id}-footage`}
+            project={project}
+            field="footage_notes"
+            title="Footage prompt"
+            hint={'Where the script\'s material comes from - Shot queries reads this and looks for each shot where its story is. For example: "Keung and June are from the comic The Bounty Hunter and the Tea Brewer. The part about the tea shop in Ba Sing Se is from The Promise." Takes effect the next time Shot queries runs.'}
+            onChange={setProject}
+          />
 
           <div className="card" style={{ marginTop: "0.75rem" }}>
             <h3>Stages</h3>

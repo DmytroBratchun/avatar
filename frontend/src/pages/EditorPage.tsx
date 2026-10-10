@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import type { ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import type { EditorProject } from "../api/client";
@@ -12,12 +13,34 @@ function formatDuration(seconds: number | null): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-function projectStage(p: EditorProject): string {
-  if (p.job?.status === "running") return `${p.job.stage}…`;
-  if (p.beats.length > 0) return `${p.beats.length} beats`;
-  if (p.word_count > 0) return "transcribed";
-  if (p.audio_file) return "audio added";
-  return "no audio";
+/** The project page's steps that every video goes through, done or not, and what
+ * the video is doing now. */
+function ProjectProgress({ p }: { p: EditorProject }) {
+  const slots = p.beats.flatMap((b) => b.slots);
+  const steps = [
+    { label: "Narration", done: p.word_count > 0 },
+    { label: "Footage", done: slots.length > 0 && slots.every((s) => s.selected != null) },
+    { label: "Video", done: !!p.rendered_at },
+  ];
+  const next = steps.find((s) => !s.done);
+  return (
+    <span className="project-progress">
+      {steps.map((s) => (
+        <span key={s.label} className={`dot ${s.done ? "done" : ""}`} title={`${s.label}: ${s.done ? "done" : "to do"}`} />
+      ))}
+      <span className="hint" style={{ margin: 0 }}>
+        {p.job?.status === "running" ? (
+          <span className="badge accent">{p.job.stage}…</span>
+        ) : p.job?.status === "error" ? (
+          <span className="error-text">{p.job.stage} failed</span>
+        ) : next ? (
+          next.label === "Narration" && !p.audio_file ? (p.script_text ? "to voice" : "no audio") : `next: ${next.label.toLowerCase()}`
+        ) : (
+          "rendered"
+        )}
+      </span>
+    </span>
+  );
 }
 
 function ProjectsRootCard({ root }: { root: string | null }) {
@@ -74,9 +97,30 @@ function ProjectsRootCard({ root }: { root: string | null }) {
   );
 }
 
+const NEW_VIDEO_TABS = [
+  { id: "basics", label: "Basics" },
+  { id: "narration", label: "Narration" },
+  { id: "editing", label: "Editing" },
+] as const;
+type NewVideoTab = (typeof NEW_VIDEO_TABS)[number]["id"];
+
+/** A label on the left and its field on the right, the way the form reads. */
+function FormRow({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  return (
+    <div className="form-row">
+      <label>{label}</label>
+      <div>
+        {children}
+        {hint && <p className="hint" style={{ margin: "0.3rem 0 0" }}>{hint}</p>}
+      </div>
+    </div>
+  );
+}
+
 function NewProjectModal({ onClose }: { onClose: () => void }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const [tab, setTab] = useState<NewVideoTab>("basics");
   const { data: universes } = useQuery({ queryKey: ["universes"], queryFn: api.listUniverses });
   const [universeId, setUniverseId] = useState<string | null>(null);
   // the first universe until the user picks another
@@ -88,6 +132,13 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
   const [audio, setAudio] = useState<File | null>(null);
   const [scriptText, setScriptText] = useState("");
   const [shows, setShows] = useState<string[]>([]);
+  const [notes, setNotes] = useState("");
+  const { data: defaultVisual } = useQuery({ queryKey: ["editorDefaultVisualNotes"], queryFn: api.getDefaultVisualNotes });
+  // null until edited: the saved default until then
+  const [editedVisual, setVisual] = useState<string | null>(null);
+  const visual = editedVisual ?? defaultVisual?.text ?? "";
+  const [rememberVisual, setRememberVisual] = useState(false);
+  const [runAll, setRunAll] = useState(true);
   const { data: defaultLook } = useQuery({ queryKey: ["editorDefaultLook"], queryFn: api.getEditorDefaultLook });
   const { data: defaultVoice } = useQuery({ queryKey: ["editorDefaultVoice"], queryFn: api.getDefaultVoice });
   // null until the user picks one; then the saved default look decides
@@ -96,26 +147,61 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
 
   const createMutation = useMutation({
     mutationFn: async () => {
-      const project = await api.createEditorProject({ title, universe: universe?.id ?? "", script_text: scriptText || undefined, shows, layout });
-      if (narration === "audio" && audio) await api.uploadEditorAudio(project.id, audio);
+      if (rememberVisual) await api.saveDefaultVisualNotes(visual);
+      const project = await api.createEditorProject({
+        title,
+        universe: universe?.id ?? "",
+        script_text: scriptText || undefined,
+        footage_notes: notes.trim() || undefined,
+        visual_notes: visual.trim() || undefined,
+        shows,
+        layout,
+      });
+      if (narration === "audio" && audio) {
+        await api.uploadEditorAudio(project.id, audio);
+        if (runAll) await api.runEditorAll(project.id);
+      }
       return project;
     },
     onSuccess: (project) => {
       queryClient.invalidateQueries({ queryKey: ["editorProjects"] });
+      queryClient.invalidateQueries({ queryKey: ["editorDefaultVisualNotes"] });
       // a project made from a script is voiced next
       navigate(narration === "script" ? `/editor/${project.id}?tab=voice` : `/editor/${project.id}`);
     },
   });
   const busy = createMutation.isPending;
-  const ready = title.trim() !== "" && (narration === "audio" || scriptText.trim() !== "");
+  // what still stops the video from being created, if anything
+  const missing = !title.trim() ? "a title (Basics)" : narration === "script" && !scriptText.trim() ? "the script (Narration)" : null;
 
   async function loadScriptFile(file: File | undefined) {
     if (file) setScriptText(await file.text());
   }
 
+  const scriptField = (rows: number) => (
+    <>
+      <textarea rows={rows} value={scriptText} disabled={busy} onChange={(e) => setScriptText(e.target.value)} style={{ width: "100%" }} />
+      <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", marginTop: "0.4rem", flexWrap: "wrap" }}>
+        <input type="file" accept=".txt,.md,text/plain" style={{ flex: 1 }} onChange={(e) => loadScriptFile(e.target.files?.[0])} />
+        {scriptText.trim() && (
+          <span className="hint" style={{ margin: 0 }}>
+            {scriptText.trim().length.toLocaleString()} characters
+          </span>
+        )}
+      </div>
+    </>
+  );
+
   function toggleShow(show: string) {
     setShows((current) => (current.includes(show) ? current.filter((s) => s !== show) : [...current, show]));
   }
+
+  // a dot on a tab that has something filled in, so nothing set there goes unseen
+  const filled: Record<NewVideoTab, boolean> = {
+    basics: title.trim() !== "",
+    narration: audio !== null || scriptText.trim() !== "",
+    editing: visual.trim() !== "" || notes.trim() !== "",
+  };
 
   return (
     <div
@@ -130,103 +216,145 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
       }}
     >
       {/* no closing on a click outside: a pasted script would be lost */}
-      <div className="card" style={{ width: "680px", maxWidth: "94vw", maxHeight: "92vh", overflowY: "auto" }}>
+      <div className="card settings-modal new-video-modal">
         <div className="card-header">
           <h3 style={{ margin: 0 }}>New video</h3>
           <button className="ghost small" onClick={onClose} disabled={busy}>
-            Close
+            ✕
           </button>
         </div>
 
-        <label>Title</label>
-        <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Why airbending is underrated" />
+        <div className="settings-body">
+          <nav className="settings-nav">
+            {NEW_VIDEO_TABS.map((t) => (
+              <button key={t.id} type="button" className={t.id === tab ? "active" : ""} onClick={() => setTab(t.id)}>
+                {t.label}
+                {filled[t.id] && <span className="tab-dot" />}
+              </button>
+            ))}
+          </nav>
 
-        <label style={{ marginTop: "0.75rem" }}>Narration</label>
-        <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", margin: 0 }}>
-            <input type="radio" style={{ width: "auto" }} checked={narration === "audio"} onChange={() => setNarration("audio")} />
-            Audio I already have
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: "0.35rem", margin: 0 }}>
-            <input type="radio" style={{ width: "auto" }} checked={narration === "script"} onChange={() => setNarration("script")} />
-            From a script, voiced here
-          </label>
+          <div className="settings-pane">
+            {tab === "basics" && (
+              <>
+                <FormRow label="Title">
+                  <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Why airbending is underrated" />
+                </FormRow>
+                <FormRow label="Universe">
+                  <select
+                    value={universe?.id ?? ""}
+                    onChange={(e) => {
+                      setUniverseId(e.target.value);
+                      setShows([]); // shows of one universe make no sense in another
+                    }}
+                  >
+                    {(universes ?? []).map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.name}
+                      </option>
+                    ))}
+                  </select>
+                </FormRow>
+                <FormRow label="Footage from" hint="None ticked: everything in this universe.">
+                  <div className="form-checks">
+                    {(universe?.available_shows ?? []).map((show) => (
+                      <label key={show}>
+                        <input type="checkbox" checked={shows.includes(show)} onChange={() => toggleShow(show)} />
+                        {show}
+                      </label>
+                    ))}
+                  </div>
+                </FormRow>
+                <FormRow label="Layout">
+                  <select value={layout} onChange={(e) => setLayout(e.target.value)}>
+                    <option value="framed">Framed - clip in a frame over a blurred background</option>
+                    <option value="simple">Simple - clip fills the screen</option>
+                  </select>
+                </FormRow>
+              </>
+            )}
+
+            {tab === "narration" && (
+              <>
+                <FormRow label="Source">
+                  <div className="form-checks">
+                    <label>
+                      <input type="radio" checked={narration === "audio"} onChange={() => setNarration("audio")} />
+                      Audio I already have
+                    </label>
+                    <label>
+                      <input type="radio" checked={narration === "script"} onChange={() => setNarration("script")} />
+                      From a script, voiced here
+                    </label>
+                  </div>
+                </FormRow>
+                {narration === "audio" ? (
+                  <>
+                    <FormRow label="Audio" hint="Can also be added later.">
+                      <input type="file" accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg" onChange={(e) => setAudio(e.target.files?.[0] ?? null)} />
+                    </FormRow>
+                    <FormRow label="Script" hint="Optional - the narration text gets names like Aang or Ba Sing Se right in the transcript.">
+                      {scriptField(6)}
+                    </FormRow>
+                  </>
+                ) : (
+                  <>
+                    <FormRow label="Script" hint="Read as written; anything in square brackets is a direction to the voice and is not spoken.">
+                      {scriptField(12)}
+                      <VoiceTextTools text={scriptText} disabled={busy} onChange={setScriptText} />
+                    </FormRow>
+                    <p className="hint">
+                      {defaultVoice?.voice_id
+                        ? `Voice: ${defaultVoice.voice_name || defaultVoice.voice_id} (the default) - it can be changed before anything is ordered.`
+                        : "The voice is chosen on the next page; nothing is ordered until you ask."}
+                    </p>
+                  </>
+                )}
+              </>
+            )}
+
+            {tab === "editing" && (
+              <>
+                <FormRow label="Visual wishes" hint="How you want the video to look, in your own words. Shot queries and the background follow it.">
+                  <textarea
+                    rows={6}
+                    value={visual}
+                    disabled={busy}
+                    onChange={(e) => setVisual(e.target.value)}
+                    placeholder="More close-ups of faces. Fights over people talking. Avoid the comics unless the script is about them."
+                    style={{ width: "100%" }}
+                  />
+                  <label className="form-inline-check">
+                    <input type="checkbox" checked={rememberVisual} onChange={(e) => setRememberVisual(e.target.checked)} />
+                    Use for new videos too
+                  </label>
+                </FormRow>
+                <FormRow label="Material from" hint={'Where the script\'s story comes from - e.g. "Keung and June are from the comic The Bounty Hunter and the Tea Brewer".'}>
+                  <textarea rows={4} value={notes} disabled={busy} onChange={(e) => setNotes(e.target.value)} placeholder="Optional" style={{ width: "100%" }} />
+                </FormRow>
+                {narration === "audio" && (
+                  <FormRow label="After creating">
+                    <label className="form-inline-check" style={{ marginTop: 0 }}>
+                      <input type="checkbox" checked={runAll} onChange={(e) => setRunAll(e.target.checked)} />
+                      Run to the end: transcribe, find footage, render (free; quotes and music are left to you)
+                    </label>
+                  </FormRow>
+                )}
+              </>
+            )}
+          </div>
         </div>
 
-        {narration === "audio" && (
-          <>
-            <label style={{ marginTop: "0.75rem" }}>Narration audio</label>
-            <input type="file" accept="audio/*,.mp3,.wav,.m4a,.flac,.ogg" onChange={(e) => setAudio(e.target.files?.[0] ?? null)} />
-          </>
-        )}
-
-        <label style={{ marginTop: "0.75rem" }}>{narration === "script" ? "Script" : "Script (optional)"}</label>
-        <p className="hint" style={{ marginTop: 0 }}>
-          {narration === "script"
-            ? "The narration text, read as written. Anything in square brackets is a direction to the voice and is not spoken. Paste it or load a file."
-            : "The narration text, if you have it - used to get names like Aang or Ba Sing Se right. Paste it or load a file."}
-        </p>
-        <textarea rows={narration === "script" ? 12 : 5} value={scriptText} disabled={busy} onChange={(e) => setScriptText(e.target.value)} />
-        <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", marginTop: "0.4rem", flexWrap: "wrap" }}>
-          <input type="file" accept=".txt,.md,text/plain" style={{ flex: 1 }} onChange={(e) => loadScriptFile(e.target.files?.[0])} />
-          {scriptText.trim() && (
-            <span className="hint" style={{ margin: 0 }}>
-              {scriptText.trim().length.toLocaleString()} characters
-            </span>
-          )}
-        </div>
-        {narration === "script" && (
-          <>
-            <VoiceTextTools text={scriptText} disabled={busy} onChange={setScriptText} />
-            <p className="hint">
-              {defaultVoice?.voice_id
-                ? `Voice: ${defaultVoice.voice_name || defaultVoice.voice_id} (the default) - it can be changed on the Voice tab before anything is ordered.`
-                : "The voice is chosen on the project's Voice tab, which opens next; nothing is ordered until you ask there."}
-            </p>
-          </>
-        )}
-
-        <label style={{ marginTop: "0.75rem" }}>Universe</label>
-        <select
-          value={universe?.id ?? ""}
-          onChange={(e) => {
-            setUniverseId(e.target.value);
-            setShows([]); // shows of one universe make no sense in another
-          }}
-        >
-          {(universes ?? []).map((u) => (
-            <option key={u.id} value={u.id}>
-              {u.name}
-            </option>
-          ))}
-        </select>
-
-        <label style={{ marginTop: "0.75rem" }}>Footage from</label>
-        <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
-          {(universe?.available_shows ?? []).map((show) => (
-            <label key={show} style={{ display: "flex", alignItems: "center", gap: "0.35rem", margin: 0 }}>
-              <input type="checkbox" style={{ width: "auto" }} checked={shows.includes(show)} onChange={() => toggleShow(show)} />
-              {show}
-            </label>
-          ))}
-        </div>
-        <p className="hint" style={{ marginTop: "0.3rem" }}>Leave all unchecked to use everything in this universe.</p>
-
-        <label style={{ marginTop: "0.75rem" }}>Layout</label>
-        <select value={layout} onChange={(e) => setLayout(e.target.value)}>
-          <option value="framed">Framed - clip in a frame over a blurred background</option>
-          <option value="simple">Simple - clip fills the screen</option>
-        </select>
-
-        <div style={{ display: "flex", gap: "0.5rem", marginTop: "0.9rem" }}>
-          <button className="primary" onClick={() => createMutation.mutate()} disabled={!ready || busy}>
+        <div className="settings-footer">
+          <button className="primary" onClick={() => createMutation.mutate()} disabled={missing !== null || busy}>
             {busy ? "Creating…" : "Create"}
           </button>
           <button className="ghost" onClick={onClose} disabled={busy}>
             Cancel
           </button>
+          {missing && <span className="hint" style={{ margin: 0 }}>Needs {missing}</span>}
+          {createMutation.isError && <span className="error-text">{(createMutation.error as Error).message}</span>}
         </div>
-        {createMutation.isError && <p className="error-text">{(createMutation.error as Error).message}</p>}
       </div>
     </div>
   );
@@ -269,7 +397,7 @@ export default function EditorPage() {
                   <tr>
                     <th>Title</th>
                     <th>Length</th>
-                    <th>Stage</th>
+                    <th>Progress</th>
                     <th>Created</th>
                   </tr>
                 </thead>
@@ -280,7 +408,9 @@ export default function EditorPage() {
                         <Link to={`/editor/${p.id}`}>{p.title}</Link>
                       </td>
                       <td>{formatDuration(p.audio_duration)}</td>
-                      <td>{projectStage(p)}</td>
+                      <td>
+                        <ProjectProgress p={p} />
+                      </td>
                       <td>{new Date(p.created_at).toLocaleDateString()}</td>
                     </tr>
                   ))}

@@ -136,7 +136,14 @@ def write_background_queries(project: Project, cwd) -> float:
         "differently so they are not the same shot. When a beat has no particular place, use neutral scenery "
         "such as clouds, sky or open water.\n\n"
         "Describe only what is visible. Do not use names of places or people - the image search does not "
-        "know them.\n\nBeats:\n" + "\n".join(lines)
+        "know them.\n\n"
+        + (
+            "The author's wishes for the picture, as far as they concern the background:\n"
+            + project.visual_notes.strip() + "\n\n"
+            if project.visual_notes and project.visual_notes.strip()
+            else ""
+        )
+        + "Beats:\n" + "\n".join(lines)
     )
     result, cost = run_claude_json(prompt, BACKGROUND_SCHEMA, cwd=cwd, timeout=600, task="background")
     for entry in result["beats"]:

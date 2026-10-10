@@ -145,6 +145,19 @@ def editor_music_library() -> str | None:
     return _read_raw().get("music_library") or None
 
 
+def editor_default_visual_notes() -> str:
+    """The visual wishes ("more close-ups, fights over talk") new video projects start
+    with - whatever the user last saved as default."""
+    return (_read_raw().get("editor_default_visual_notes") or "").strip()
+
+
+def set_editor_default_visual_notes(text: str) -> None:
+    with _lock:
+        raw = _read_raw()
+        raw["editor_default_visual_notes"] = text
+        SETTINGS_PATH.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+
 def editor_default_voice() -> dict:
     """The voice and its settings new video projects start with - whatever the user
     last saved as default from a project's Voice tab."""
