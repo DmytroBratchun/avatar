@@ -346,6 +346,25 @@ export default function RenderSettingsCard({
           Wider: more of the page to scroll through, but a softer picture - the scans are small. At 100% the page
           covers the screen, so no background is drawn behind it and the clip renders faster.
         </p>
+
+        <label
+          style={{ marginTop: "0.6rem" }}
+          title="How fast a page may scroll. A page shown only briefly then shows just the part it has time for, from its top (or its bottom, when it scrolls up), instead of racing to the end."
+        >
+          Fastest scroll
+        </label>
+        <select
+          style={{ width: "auto" }}
+          value={settings.comic_max_speed}
+          disabled={busy}
+          onChange={(e) => save({ comic_max_speed: Number(e.target.value) })}
+        >
+          {[0, 100, 150, 200, 300, 400].map((n) => (
+            <option key={n} value={n}>
+              {n === 0 ? "no limit - always the whole page" : `${n} px a second`}
+            </option>
+          ))}
+        </select>
       </Section>
 
       <p className="hint" style={{ marginTop: "0.75rem", marginBottom: 0 }}>

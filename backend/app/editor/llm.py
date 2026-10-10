@@ -7,11 +7,11 @@ from app.services.runtime_settings import editor_llm_model
 
 
 def run_claude_json(
-    prompt: str, schema: dict, cwd: Path, timeout: int = 300, model: str | None = None, tools: list[str] | None = None
+    prompt: str, schema: dict, cwd: Path, timeout: int = 300, task: str | None = None, tools: list[str] | None = None
 ) -> tuple[dict, float | None]:
     """One text-only headless Claude Code call returning schema-validated JSON,
-    billed to the Claude subscription like captioning. The model comes from
-    editor_llm_model() (Sonnet unless configured otherwise).
+    billed to the Claude subscription like captioning. The model is the one set for
+    `task` (one of runtime_settings.EDITOR_TASKS), else the editor-wide one.
 
     The prompt goes over stdin, not argv - a whole narration transcript blows past
     Windows' ~32k command-line limit. cwd should be outside this repo so the call
@@ -20,8 +20,7 @@ def run_claude_json(
     env = os.environ.copy()
     env.pop("ANTHROPIC_API_KEY", None)
 
-    # a stage can ask for a specific model; otherwise the editor-wide setting applies
-    model = model or editor_llm_model()
+    model = editor_llm_model(task)
     result = subprocess.run(
         [
             "claude", "-p",

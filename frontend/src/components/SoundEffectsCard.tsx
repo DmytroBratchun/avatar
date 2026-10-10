@@ -54,7 +54,7 @@ export default function SoundEffectsCard({
           disabled={disabled || settings.isPending || !project.settings.sound_effects}
           onChange={(e) => settings.mutate({ sfx_volume: Number(e.target.value) })}
         >
-          {[6, 9, 12, 15, 18, 22].map((n) => (
+          {[6, 9, 12, 15, 18, 22, 26, 30, 35, 40].map((n) => (
             <option key={n} value={n}>
               −{n} dB
             </option>

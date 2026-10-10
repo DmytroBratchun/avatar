@@ -14,6 +14,8 @@ from sqlalchemy.orm import Session
 from app.config import BACKEND_DIR, settings
 from app.db.models import Scene, Source, TranscriptLine
 from app.services.runtime_settings import (
+    api_model,
+    cli_model_args,
     caption_only_undescribed,
     current_anthropic_api_key,
     current_caption_model,
@@ -310,7 +312,7 @@ def caption_scene_via_api(
             + (f"\n\n{COMIC_INSTRUCTION_TEXT}" if source.kind == "comic" else ""),
         },
     ]
-    model = current_caption_model()
+    model = api_model(current_caption_model())
     response = _client().messages.create(
         model=model,
         max_tokens=1024,
@@ -366,7 +368,7 @@ def caption_scene_via_claude_code(
     result = subprocess.run(
         [
             "claude", "-p", prompt,
-            "--model", current_caption_model(),
+            *cli_model_args(current_caption_model()),
             "--output-format", "json",
             "--json-schema", json.dumps(schema),
             "--tools", "Read",
@@ -382,6 +384,7 @@ def caption_scene_via_claude_code(
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",  # not the Windows code page: dashes and quotes came back garbled
         timeout=120,
     )
     if result.returncode != 0:

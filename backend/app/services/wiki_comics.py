@@ -82,6 +82,10 @@ def page_texts(source_id: int, report=None) -> list[str]:
         if report:
             report(number + 1, len(images))
     cache.write_text(json.dumps(texts, ensure_ascii=False), encoding="utf-8")
+    # the scan site's "read more free comics" strip at the foot of some pages
+    from app.services.comic_watermarks import strip_comic
+
+    strip_comic(source_id, texts, engine)
     return texts
 
 

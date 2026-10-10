@@ -10,6 +10,7 @@ class SettingsOut(BaseModel):
     caption_provider: str
     caption_provider_from_env: bool
     caption_model: str
+    caption_model_override: str
     caption_model_from_env: bool
     anthropic_api_key: str
     anthropic_api_key_from_env: bool
@@ -17,6 +18,8 @@ class SettingsOut(BaseModel):
     lumean_api_key_from_env: bool
     openai_api_key: str
     openai_api_key_from_env: bool
+    editor_llm_model: str
+    editor_llm_models: dict[str, str]
 
 
 class SettingsUpdateIn(BaseModel):
@@ -25,6 +28,8 @@ class SettingsUpdateIn(BaseModel):
     anthropic_api_key: str | None = None
     lumean_api_key: str | None = None
     openai_api_key: str | None = None
+    editor_llm_model: str | None = None
+    editor_llm_models: dict[str, str] | None = None
 
 
 @router.get("", response_model=SettingsOut)
@@ -40,5 +45,7 @@ def write_settings(payload: SettingsUpdateIn) -> dict:
         anthropic_api_key=payload.anthropic_api_key,
         lumean_api_key=payload.lumean_api_key,
         openai_api_key=payload.openai_api_key,
+        editor_llm_model=payload.editor_llm_model,
+        editor_llm_models=payload.editor_llm_models,
     )
     return get_effective_settings()

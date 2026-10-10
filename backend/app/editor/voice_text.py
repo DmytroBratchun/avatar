@@ -132,7 +132,7 @@ def optimize(text: str, instructions: str = "") -> tuple[str, list[dict], float 
         + text
     )
     # away from the repo, so the call doesn't load its CLAUDE.md
-    result, cost = run_claude_json(prompt, SCHEMA, cwd=Path(tempfile.gettempdir()), timeout=TIMEOUT)
+    result, cost = run_claude_json(prompt, SCHEMA, cwd=Path(tempfile.gettempdir()), timeout=TIMEOUT, task="voice_text")
     ready = (result.get("text") or "").strip()
     if not ready:
         raise RuntimeError("Claude returned no script")

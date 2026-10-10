@@ -260,7 +260,7 @@ def run_beats(project_id: str, report: Report) -> None:
     )
 
     report(f"grouping {len(units)} units into beats")
-    result, cost = run_claude_json(prompt, BEATS_SCHEMA, cwd=store.project_dir(project_id))
+    result, cost = run_claude_json(prompt, BEATS_SCHEMA, cwd=store.project_dir(project_id), task="beats")
     groups = _repair_grouping(result["beats"], len(units))
 
     # A quote plays between two beats, so a beat must end wherever one is placed.
@@ -476,7 +476,7 @@ def _requery(project: store.Project, failed: list[tuple[Beat, Slot]], shows: lis
         "names, visual_query the same frame by what is visible only, with no names; shows names where to "
         "search, by exact title.\n\n" + "\n".join(lines)
     )
-    result, cost = run_claude_json(prompt, REQUERY_SCHEMA, cwd=cwd, timeout=300)
+    result, cost = run_claude_json(prompt, REQUERY_SCHEMA, cwd=cwd, timeout=300, task="queries")
     for entry in result.get("shots", []):
         number = int(entry.get("shot", -1))
         if not 0 <= number < len(failed):
@@ -639,7 +639,7 @@ def run_queries(project_id: str, report: Report) -> None:
             + "Beats:\n" + "\n".join(lines)
         )
         report(f"writing shot queries for beats {window_start + 1}-{window_start + len(window)} of {len(beats)}")
-        result, cost = run_claude_json(prompt, QUERIES_SCHEMA, cwd=store.project_dir(project_id), timeout=600)
+        result, cost = run_claude_json(prompt, QUERIES_SCHEMA, cwd=store.project_dir(project_id), timeout=600, task="queries")
         total_cost += cost or 0.0
 
         for entry in result["beats"]:

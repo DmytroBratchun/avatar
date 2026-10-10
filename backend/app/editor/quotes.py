@@ -45,9 +45,7 @@ logger = logging.getLogger(__name__)
 EPISODES_PER_QUOTE = 3
 # the review shows this many sentences of narration either side of a clip, and may move it within them
 REVIEW_BEFORE, REVIEW_AFTER = 3, 3
-# Quotes depend on the model remembering which line is spoken where. Tried with Sonnet,
-# recall turned up lines that are not in the show at all; Opus found 6 of 7.
-QUOTE_MODEL = "opus"
+# the model is the "quotes" task's (Opus unless changed: see runtime_settings.DEFAULT_TASK_MODELS)
 # transcripts are read in batches of episodes, at most about this many characters per call
 BATCH_CHARS = 60_000
 # A quote is a sentence or two. Whole speeches and exchanges stall the narration, so
@@ -336,7 +334,7 @@ def _wanted(
         )
     )
     schema = _offering(WANTED_SCHEMA, "bank_then", BANK_THEN) if cuts and bank else WANTED_SCHEMA
-    result, cost = run_claude_json(prompt, schema, cwd=cwd, timeout=600, model=QUOTE_MODEL)
+    result, cost = run_claude_json(prompt, schema, cwd=cwd, timeout=600, task="quotes")
     known = {source.id for source in episodes}
     wanted = []
     for quote in result["quotes"]:
@@ -419,7 +417,7 @@ def _read_episodes(
         )
         report(f"reading episodes {b + 1}/{len(batches)}")
         schema = _offering(PICK_SCHEMA, "then", PICK_THEN) if cuts else PICK_SCHEMA
-        result, batch_cost = run_claude_json(prompt, schema, cwd=cwd, timeout=900, model=QUOTE_MODEL)
+        result, batch_cost = run_claude_json(prompt, schema, cwd=cwd, timeout=900, task="quotes")
         cost += batch_cost or 0.0
         picks.extend(result["quotes"])
     return picks, offered, cost
@@ -467,7 +465,7 @@ def _review(project: Project, words: list[Word], ends: list[int], universe, cwd:
         "may stay, including all or none. Answer for every clip.\n\n"
         + "\n\n".join(blocks)
     )
-    result, cost = run_claude_json(prompt, REVIEW_SCHEMA, cwd=cwd, timeout=600, model=QUOTE_MODEL)
+    result, cost = run_claude_json(prompt, REVIEW_SCHEMA, cwd=cwd, timeout=600, task="quotes")
     dropped: set[str] = set()
     for answer in result.get("clips", []):
         n = int(answer.get("clip", -1))

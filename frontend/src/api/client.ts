@@ -103,6 +103,7 @@ export interface SettingsOut {
   caption_provider: string;
   caption_provider_from_env: boolean;
   caption_model: string;
+  caption_model_override: string;
   caption_model_from_env: boolean;
   anthropic_api_key: string;
   anthropic_api_key_from_env: boolean;
@@ -110,6 +111,8 @@ export interface SettingsOut {
   lumean_api_key_from_env: boolean;
   openai_api_key: string;
   openai_api_key_from_env: boolean;
+  editor_llm_model: string;
+  editor_llm_models: Record<string, string>;
 }
 
 export interface SceneOut {
@@ -501,6 +504,7 @@ export interface EditorProject {
     music_level: number;
     music_library_only: boolean;
     comic_width: number;
+    comic_max_speed: number;
     sound_effects: boolean;
     sfx_volume: number;
     frame_rate: number;
@@ -608,6 +612,8 @@ export const api = {
     anthropic_api_key?: string;
     lumean_api_key?: string;
     openai_api_key?: string;
+    editor_llm_model?: string;
+    editor_llm_models?: Record<string, string>;
   }) =>
     request<SettingsOut>("/api/settings", { method: "PATCH", body: JSON.stringify(payload) }),
 
@@ -683,6 +689,7 @@ export const api = {
       music_level?: number;
       music_library_only?: boolean;
       comic_width?: number;
+      comic_max_speed?: number;
       sound_effects?: boolean;
       sfx_volume?: number;
       frame_rate?: number;

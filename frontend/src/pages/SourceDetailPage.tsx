@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client";
 import SceneCard from "../components/SceneCard";
+import ViewToggle, { useView } from "../components/ViewToggle";
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -66,6 +67,7 @@ export default function SourceDetailPage() {
   const { id } = useParams();
   const sourceId = Number(id);
   const queryClient = useQueryClient();
+  const [view, setView] = useView("scenes");
 
   const { data: source } = useQuery({
     queryKey: ["source", sourceId],
@@ -220,8 +222,11 @@ export default function SourceDetailPage() {
       )}
 
       <div className="card" style={{ marginTop: "0.75rem" }}>
-        <h3>Scenes ({scenes?.length ?? 0})</h3>
-        <div className="results">{scenes?.map((scene) => <SceneCard key={scene.id} scene={scene} />)}</div>
+        <div className="card-header">
+          <h3 style={{ margin: 0 }}>Scenes ({scenes?.length ?? 0})</h3>
+          <ViewToggle view={view} onChange={setView} />
+        </div>
+        <div className={view === "grid" ? "results grid" : "results"}>{scenes?.map((scene) => <SceneCard key={scene.id} scene={scene} />)}</div>
       </div>
 
     </div>

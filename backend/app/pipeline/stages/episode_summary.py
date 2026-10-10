@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.config import BACKEND_DIR
 from app.db.models import Source, TranscriptLine
 from app.pipeline.stages.caption import OLLAMA_URL, _client, _episode_primer, _real_api_cost
-from app.services.runtime_settings import current_caption_model, current_caption_provider
+from app.services.runtime_settings import api_model, cli_model_args, current_caption_model, current_caption_provider
 
 SUMMARY_INSTRUCTION = (
     "Write a concise summary (3-6 sentences) of this episode's transcript covering: which "
@@ -19,7 +19,7 @@ SUMMARY_INSTRUCTION = (
 
 
 def _summarize_via_api(source: Source, transcript_text: str) -> tuple[str, float | None]:
-    model = current_caption_model()
+    model = api_model(current_caption_model())
     prompt = f"{_episode_primer(source)}\n\n{SUMMARY_INSTRUCTION}\n\nFull transcript:\n{transcript_text}"
     response = _client().messages.create(
         model=model, max_tokens=512, messages=[{"role": "user", "content": prompt}]
@@ -32,8 +32,8 @@ def _summarize_via_claude_code(source: Source, transcript_text: str) -> tuple[st
     env = os.environ.copy()
     env.pop("ANTHROPIC_API_KEY", None)
     result = subprocess.run(
-        ["claude", "-p", prompt, "--model", current_caption_model(), "--output-format", "json"],
-        cwd=str(BACKEND_DIR), env=env, capture_output=True, text=True, timeout=120,
+        ["claude", "-p", prompt, *cli_model_args(current_caption_model()), "--output-format", "json"],
+        cwd=str(BACKEND_DIR), env=env, capture_output=True, text=True, encoding="utf-8", timeout=120,
     )
     if result.returncode != 0:
         raise RuntimeError(f"claude CLI exited {result.returncode}: {result.stderr.strip()[:500]}")

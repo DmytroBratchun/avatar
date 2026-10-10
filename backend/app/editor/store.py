@@ -267,6 +267,9 @@ class RenderSettings(BaseModel):
     # how wide a comic page is shown, as a share of the screen's width. Wider means
     # more of the page to scroll through, and a softer picture: the scans are small
     comic_width: float = 0.55
+    # fastest a comic page may scroll, in pixels of the 1080p screen per second; a page
+    # shown briefly then shows only the part it has time for. 0 = no limit.
+    comic_max_speed: float = 0.0
     # compose no new music: fill the blocks from the music library only
     music_library_only: bool = False
     # standard sound effects (editor/sounds.py) at the start of comic pages and photos,
@@ -276,6 +279,10 @@ class RenderSettings(BaseModel):
     # 24: the footage's own 23.976 fps. 48: twice that - footage shows each frame
     # twice, but a scrolling comic page or panning photo moves half as far per frame
     frame_rate: int = 24
+    # the finished video's sound is raised (or lowered) so the narration sits at this
+    # loudness, in LUFS. YouTube turns louder videos down to -14 but never turns a
+    # quieter one up, so a video below it just plays quieter than the rest.
+    loudness_target: float = -14.0
 
 
 class Project(BaseModel):

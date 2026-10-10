@@ -63,6 +63,30 @@ def _run(args: list[str]) -> subprocess.CompletedProcess:
     return result
 
 
+def _run_reporting(args: list[str], seconds: float, label: str, report) -> None:
+    """Runs an ffmpeg command, reporting how far into the output it is ("label 312s /
+    1520s", which the UI shows as a filling ring)."""
+    import tempfile
+
+    with tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(
+            [args[0], "-progress", "pipe:1", "-nostats", *args[1:]],
+            stdout=subprocess.PIPE, stderr=errors, text=True, encoding="utf-8", errors="replace",
+        )
+        last = 0.0
+        for line in process.stdout:
+            key, _, value = line.strip().partition("=")
+            if key == "out_time_us" and value.isdigit():
+                done = min(seconds, int(value) / 1e6)
+                if done - last >= 5 or done >= seconds:
+                    report(f"{label} {done:.0f}s / {seconds:.0f}s")
+                    last = done
+        if process.wait() != 0:
+            errors.seek(0)
+            message = errors.read().decode("utf-8", "replace").strip()
+            raise RuntimeError(f"ffmpeg failed: {message[-600:]}")
+
+
 # --- baked-in black bars ----------------------------------------------------
 
 
@@ -319,24 +343,40 @@ def _comic_args(
     width, height = _comic_size(candidate, settings)
     travel = max(0, height - HEIGHT)  # how far the page has to move to show its bottom
     seconds = frames / FPS
+    # With a speed limit a page shown briefly scrolls only as far as it has time for:
+    # down from its top, or up from its bottom when `upward`. The average speed is
+    # held to the limit (eased motion peaks at 1.5 times it, in the middle).
+    limit = settings.comic_max_speed
+    moved = min(travel, round(limit * seconds)) if limit > 0 else travel
     # eased: the page starts and stops gently rather than at full speed
     progress = f"min(1,t/{seconds:.4f})"
-    if upward:
-        progress = f"(1-{progress})"
-    y = f"-{travel}*({progress}*{progress}*(3-2*{progress}))" if travel else f"{(HEIGHT - height) // 2}"
+    eased = f"({progress}*{progress}*(3-2*{progress}))"
+    if not travel:
+        y = f"{(HEIGHT - height) // 2}"
+    elif upward:
+        y = f"-({travel}-{moved}*{eased})"
+    else:
+        y = f"-{moved}*{eased}"
     keep = 1.0 - settings.dim
     sigma = max(0.1, settings.blur / 4)
     inputs = ["-framerate", _rate(factor), "-i", candidate.image_path]
     page = f"scale={width}:{height}:flags=lanczos,format=yuv420p,setsar=1,{STILL}"
+    # the page image itself may change (a watermark cut off it): its size tells
+    stamp = Path(candidate.image_path).stat().st_size
     identity = {
-        "comic": candidate.image_path, "frames": frames, "width": width, "blur": settings.blur,
+        "comic": candidate.image_path, "stamp": stamp, "frames": frames, "width": width, "blur": settings.blur,
         "dim": settings.dim, "v": ENCODE_VERSION, "upward": upward,
     }
+    if moved < travel:
+        identity["moved"] = moved
     if width >= WIDTH and height >= HEIGHT:
         # The page hides everything behind it: no background is read or drawn, and the
         # screen is a window moving down the page (exact: a pixel at a time, not two).
         graph = f"[0:v]{page},crop={WIDTH}:{HEIGHT}:0:'-({y})':exact=1[out]"
-        identity = {"comic": candidate.image_path, "frames": frames, "width": width, "v": ENCODE_VERSION, "upward": upward}
+        identity = {
+            "comic": candidate.image_path, "stamp": stamp, "frames": frames, "width": width, "v": ENCODE_VERSION,
+            "upward": upward, **({"moved": moved} if moved < travel else {}),
+        }
         return [*inputs, "-filter_complex", graph, "-map", "[out]", *encode], identity
     if track is None:
         graph = (
@@ -997,19 +1037,29 @@ def render_project(project_id: str, report) -> None:
         report("joining clips with the narration")
     music_track = None
     if project.settings.music_enabled and project.music:
-        from app.editor.music import build_track
+        from app.editor.music import blocks_fit, build_track, refit_blocks
 
         report("mixing the music")
+        if not blocks_fit(project) and refit_blocks(project):
+            # the beats were built again since the music was planned: keep the music
+            blocks = project.music
+            store.update_project(project_id, lambda p: setattr(p, "music", blocks))
         music_track = build_track(project, folder)
         report("joining clips with the narration")
+    # one gain for the whole soundtrack, so the narration ends at the target loudness;
+    # a limiter keeps the odd loud quote or peak from clipping
+    from app.editor.music import narration_loudness
+
+    gain = project.settings.loudness_target - narration_loudness(project, folder)
+    level = f"volume={gain:.2f}dB,alimiter=limit=0.891:level=disabled:latency=1"
     if not interruptions and music_track is None:
-        audio_inputs, audio_map = ["-i", narration], ["-map", "1:a"]
+        audio_inputs, audio_map = ["-i", narration], ["-map", "1:a", "-af", level]
     else:
         audio_inputs, graph = _soundtrack(
             narration, interruptions, str(music_track) if music_track else None, project.audio_duration or 0.0
         )
-        audio_map = ["-filter_complex", graph, "-map", "[a]"]
-    _run([
+        audio_map = ["-filter_complex", f"{graph};[a]{level}[loud]", "-map", "[loud]"]
+    _run_reporting([
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-f", "concat", "-safe", "0", "-i", str(concat_list),
         *audio_inputs,
@@ -1017,7 +1067,7 @@ def render_project(project_id: str, report) -> None:
         # quote sources carry episode chapters/metadata that would otherwise be copied in
         "-map_chapters", "-1", "-map_metadata", "-1",
         "-movflags", "+faststart", str(partial),
-    ])
+    ], total_frames / FPS, "joining clips with the narration", report)
     # The previous render may still be open - in a player, or streamed to the browser
     # tab that watched it - and Windows won't replace an open file. The new video then
     # gets a name of its own rather than the render failing after all the encoding.

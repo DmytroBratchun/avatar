@@ -138,7 +138,7 @@ def write_background_queries(project: Project, cwd) -> float:
         "Describe only what is visible. Do not use names of places or people - the image search does not "
         "know them.\n\nBeats:\n" + "\n".join(lines)
     )
-    result, cost = run_claude_json(prompt, BACKGROUND_SCHEMA, cwd=cwd, timeout=600)
+    result, cost = run_claude_json(prompt, BACKGROUND_SCHEMA, cwd=cwd, timeout=600, task="background")
     for entry in result["beats"]:
         index = int(entry["beat"])
         if 0 <= index < len(project.beats):

@@ -182,7 +182,7 @@ def pick_pages(
         + ("\n\nBeats:\n" + "\n".join(beat_lines) if beats else "")
         + ("\n\nShots:\n" + "\n".join(shot_lines) if shots else "")
     )
-    result, cost = run_claude_json(prompt, SCHEMA, cwd=cwd, timeout=600)
+    result, cost = run_claude_json(prompt, SCHEMA, cwd=cwd, timeout=600, task="comic_pages")
 
     timed: dict[int, list[tuple[Candidate, float, float]] | None] = {i: None for i in range(len(beats))}
     for entry in result.get("beats", []):

@@ -82,7 +82,7 @@ def _look(project_id: str, query: str, narration: str) -> tuple[list[dict], floa
         "the name, maps, diagrams, logos, scans of text, collages, and photos where it is too small or unclear "
         "to make out. For a person, a clear photo of their face is best. Keep none rather than a wrong one."
     )
-    result, cost = run_claude_json(prompt, VERIFY_SCHEMA, cwd=folder, timeout=300, tools=["Read"])
+    result, cost = run_claude_json(prompt, VERIFY_SCHEMA, cwd=folder, timeout=300, task="photos", tools=["Read"])
     kept = []
     for number in result.get("keep", []):
         if 1 <= int(number) <= len(found) and found[int(number) - 1] not in kept:

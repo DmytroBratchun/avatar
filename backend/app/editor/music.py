@@ -76,6 +76,34 @@ BLOCKS_SCHEMA = {
 # --- planning ----------------------------------------------------------------
 
 
+def refit_blocks(project: Project) -> bool:
+    """Puts blocks planned for earlier beats onto the current ones, keeping their
+    music: each block ends on the beat boundary nearest where it ended, the next
+    starts right after. Building the beats again (often to fix a transcript)
+    otherwise left the video silently without music. Returns whether the blocks fit
+    now; a block that comes out longer may lack a little music until the stage runs."""
+    if not project.music or not project.beats:
+        return False
+    if blocks_fit(project):
+        return True
+    beats = project.beats
+    first = 0
+    for n, block in enumerate(project.music):
+        last_block = n == len(project.music) - 1
+        if first >= len(beats):
+            return False  # more blocks than beats left: plan again
+        if last_block:
+            last = len(beats) - 1
+        else:
+            # leave at least one beat for each block still to come
+            room = range(first, len(beats) - (len(project.music) - n - 1))
+            last = min(room, key=lambda i: abs(beats[i].end - block.end))
+        block.beat_first, block.beat_last = beats[first].id, beats[last].id
+        block.start, block.end = beats[first].start, beats[last].end
+        first = last + 1
+    return blocks_fit(project)
+
+
 def blocks_fit(project: Project) -> bool:
     """Whether the stored blocks still describe the project's beats - beats built
     again, or a new narration, leave them pointing at times that no longer exist."""
@@ -122,7 +150,7 @@ def plan_blocks(project: Project, cwd: Path) -> tuple[list[MusicBlock], float]:
         "next to each other must be clearly different in mood but related in sound, since one fades into "
         "the next.\n\nBeats:\n" + "\n".join(lines)
     )
-    result, cost = run_claude_json(prompt, BLOCKS_SCHEMA, cwd=cwd, timeout=600)
+    result, cost = run_claude_json(prompt, BLOCKS_SCHEMA, cwd=cwd, timeout=600, task="music")
 
     # make the answer tile the beats: in order, no gaps, no overlaps, to the last beat
     entries = sorted(result["blocks"], key=lambda e: int(e["first_beat"]))
@@ -401,6 +429,8 @@ def compose(project_id: str, report) -> None:
     out = folder / FOLDER
     out.mkdir(exist_ok=True)
 
+    if refit_blocks(project):
+        _save(project_id, project.music)
     if not blocks_fit(project):
         report("dividing the narration into moods")
         blocks, cost = plan_blocks(project, folder)

@@ -69,6 +69,7 @@ class ProjectUpdateIn(BaseModel):
     music_level: float | None = None
     music_library_only: bool | None = None
     comic_width: float | None = None
+    comic_max_speed: float | None = None
     sound_effects: bool | None = None
     sfx_volume: float | None = None
     frame_rate: int | None = None
@@ -184,10 +185,12 @@ def update_project(project_id: str, payload: ProjectUpdateIn) -> Project:
             p.settings.music_library_only = data["music_library_only"]
         if data.get("comic_width") is not None:
             p.settings.comic_width = min(1.0, max(0.3, data["comic_width"]))
+        if data.get("comic_max_speed") is not None:
+            p.settings.comic_max_speed = min(2000.0, max(0.0, data["comic_max_speed"]))
         if data.get("sound_effects") is not None:
             p.settings.sound_effects = data["sound_effects"]
         if data.get("sfx_volume") is not None:
-            p.settings.sfx_volume = min(30.0, max(0.0, data["sfx_volume"]))
+            p.settings.sfx_volume = min(48.0, max(0.0, data["sfx_volume"]))
         if data.get("frame_rate") is not None:
             p.settings.frame_rate = 48 if data["frame_rate"] == 48 else 24
 

@@ -173,7 +173,7 @@ def _session(asks: list[tuple[int, Beat, Slot, list[str]]], cwd: Path, again: bo
     )
     env = os.environ.copy()
     env.pop("ANTHROPIC_API_KEY", None)
-    model = editor_llm_model()
+    model = editor_llm_model("moments")
     result = subprocess.run(
         [
             "claude", "-p",
