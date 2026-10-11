@@ -31,9 +31,11 @@ MIN_DESCRIPTION_CHARS = 20
 
 _HEADING = re.compile(r"^(INT|EXT|INT\./EXT|EXT\./INT)[.\s]")
 # a line of its own in capitals ("FADE TO BLACK", "CUT TO:") - "FADE UP: An ancient map..." is action
-_TRANSITION = re.compile(r"^((FADE|CUT|DISSOLVE|SMASH CUT|MATCH CUT)\b.*|.*\bTO:|THE END|\(?CONTINUED\)?:?|\(MORE\))$")
+_TRANSITION = re.compile(r"^((FADE|CUT|DISSOLVE|SMASH CUT|MATCH CUT)\b.*|.*\bTO:|THE END|\(?CONTINUED\b.*|\(MORE\))$")
 # titles on the screen, not what it shows
 _SUPER = re.compile(r"^SUPER:")
+# a page's header or footer: "Final Revision - October, 2003 56."
+_FOOTER = re.compile(r"^.*\b(Revision|Draft)\b.*\d+\.?$", re.I)
 
 
 def _clean(text: str) -> str:
@@ -49,7 +51,32 @@ def _sentence_case(text: str) -> str:
 
 def _speaker(cue: str) -> str:
     """"GALADRIEL (V.O.) (CONT'D)" -> "Galadriel"."""
-    return re.sub(r"\s*\([^)]*\)", "", cue).strip().title()
+    name = re.sub(r"\s*\([^)]*\)", "", cue)
+    name = re.sub(r"\s+(V\.?/?[O0]\.?|O\.?S\.?|O\.?C\.?)$", "", name.strip(" ."))
+    # scanned scripts leave stray marks around a name
+    name = re.sub(r"^[^A-Za-z]+|[^A-Za-z]+$", "", name)
+    return re.sub(r"\s+", " ", name).title()
+
+
+def _mend_speakers(entries: list[Entry]) -> None:
+    """A scanned script can split a name with spaces ("GA ND ALF"): such a name takes
+    the spelling of the most used name it equals without spaces."""
+    counts: dict[str, int] = {}
+    for entry in entries:
+        if entry.kind == "line":
+            counts[entry.speaker] = counts.get(entry.speaker, 0) + 1
+    best: dict[str, str] = {}
+    for name, _ in sorted(counts.items(), key=lambda item: -item[1]):
+        best.setdefault(name.replace(" ", "").lower(), name)
+    for entry in entries:
+        if entry.kind == "line":
+            entry.speaker = best[entry.speaker.replace(" ", "").lower()]
+
+
+def _is_cue(line: str) -> bool:
+    """A speaker's name in capitals - "SMEAGOL (cont'd)" too."""
+    name = re.sub(r"\([^)]*\)", "", line)
+    return not line.startswith("(") and bool(re.search(r"[A-Z]", name)) and name.upper() == name
 
 
 def parse(text: str) -> list[Entry]:
@@ -89,9 +116,10 @@ def parse(text: str) -> list[Entry]:
             or _SUPER.match(stripped)
             or (_TRANSITION.match(stripped) and stripped.upper() == stripped)
             or re.fullmatch(r"\d+[A-Z]?\.", stripped)
+            or _FOOTER.match(stripped)
         ):
             continue
-        if indent >= CUE_INDENT and stripped.upper() == stripped and re.search(r"[A-Z]", stripped):
+        if indent >= CUE_INDENT and _is_cue(stripped):
             flush()
             speaker = _speaker(stripped)
             continue
@@ -105,6 +133,7 @@ def parse(text: str) -> list[Entry]:
             flush()
         action.append(stripped)
     flush()
+    _mend_speakers(entries)
     return entries
 
 
