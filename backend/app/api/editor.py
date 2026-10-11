@@ -160,6 +160,18 @@ def get_project(project_id: str) -> Project:
     return _load(project_id)
 
 
+@router.delete("/projects/{project_id}")
+def delete_project(project_id: str) -> dict:
+    """Deletes the project and its folder: narration, voice-over, music, rendered
+    segments and the video. Tracks it put in the music library stay there."""
+    _idle(project_id)
+    if jobs.is_busy(project_id):
+        raise HTTPException(409, "A stage is running - wait for it to finish")
+    left = store.delete_project(project_id)
+    music_library.forget_project(project_id, set())
+    return {"left": left}
+
+
 @router.patch("/projects/{project_id}", response_model=Project)
 def update_project(project_id: str, payload: ProjectUpdateIn) -> Project:
     _load(project_id)
@@ -656,10 +668,11 @@ def replan_music(project_id: str) -> Project:
 
 @router.get("/projects/{project_id}/music/files/{name}")
 def get_music_file(project_id: str, name: str):
-    _load(project_id)
+    project = _load(project_id)
     base = (store.project_dir(project_id) / "music").resolve()
-    path = (base / name).resolve()
-    if path.parent != base or not path.is_file():
+    track = next((t for b in project.music for t in b.tracks if t.file == name), None)
+    path = music_library.file_of(track, base) if track else (base / name).resolve()
+    if track is None and path.parent != base or not path.is_file():
         raise HTTPException(404, "File not found")
     return FileResponse(path)
 

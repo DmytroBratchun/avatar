@@ -658,6 +658,8 @@ export const api = {
     }),
   listEditorProjects: () => request<EditorProjectSummary[]>("/api/editor/projects"),
   getEditorProject: (id: string) => request<EditorProject>(`/api/editor/projects/${id}`),
+  // deletes the project folder; `left` lists files that could not be removed (open elsewhere)
+  deleteEditorProject: (id: string) => request<{ left: string[] }>(`/api/editor/projects/${id}`, { method: "DELETE" }),
   getEditorDefaultLook: () => request<EditorProject["settings"]>("/api/editor/default-look"),
   saveEditorDefaultLook: (id: string) =>
     request<EditorProject["settings"]>(`/api/editor/projects/${id}/save-default-look`, { method: "POST" }),

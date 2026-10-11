@@ -14,8 +14,8 @@ prompt almost the same as its own (REUSE_SIMILARITY - then composing again would
 only grow the library with more of the same), and when the project is set to use
 the library only (out of Lumean tokens, or to spend nothing) - then the closest
 tracks there are. Prompts are compared by meaning, with the text embedding model.
-A track taken from the library is copied into the project, which stays complete
-on its own; the library remembers which videos each track plays in, and prefers
+A track in the library is played from there - a project keeps only its
+measurements and library id, no copy of the audio (file_of); the library remembers which videos each track plays in, and prefers
 the ones used least.
 """
 
@@ -188,11 +188,21 @@ def similar(prompt: str, at_least: float) -> list[tuple[float, LibraryTrack]]:
     return sorted(found, key=lambda pair: (-round(pair[0], 3), len(pair[1].used_in)))
 
 
+def file_of(track: MusicTrack, out: Path) -> Path:
+    """Where a track's audio is: in the library once it is filed there (the project
+    keeps no copy), else in the project's music folder `out`."""
+    folder = root()
+    if track.library_id and folder is not None:
+        path = folder / f"{track.library_id}{Path(track.file).suffix}"
+        if path.is_file():
+            return path
+    return out / track.file
+
+
 def take(project: Project, block: MusicBlock, entry: LibraryTrack, out: Path) -> MusicTrack:
-    """Copies a library track into the project and returns it as the block's track."""
+    """A library track as the block's track - played from the library, not copied."""
     folder = root()
     name = f"{block.id}_lib_{entry.id}{Path(entry.file).suffix}"
-    shutil.copyfile(folder / entry.file, out / name)
     with _lock:
         known = _load(folder)
         for known_entry in known:

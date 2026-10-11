@@ -14,6 +14,7 @@ import datetime as dt
 import json
 import os
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -450,6 +451,18 @@ def create_project(
         )
         _write_json(root / project_id / PROJECT_FILE, project.model_dump())
         return project
+
+
+def delete_project(project_id: str) -> list[str]:
+    """Deletes a project's folder with everything in it. project.json goes first,
+    so the project is gone even if some file can't be removed (a video still open
+    in a player). Returns the files that are left."""
+    folder = project_dir(project_id)
+    with _lock:
+        (folder / PROJECT_FILE).unlink()
+    left: list[str] = []
+    shutil.rmtree(folder, onexc=lambda _func, path, _exc: left.append(path))
+    return left
 
 
 def load_project(project_id: str) -> Project:

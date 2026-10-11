@@ -320,7 +320,7 @@ def build_track(project: Project, folder: Path) -> Path | None:
     if not blocks_fit(project) or not project.audio_file:
         return None
     out = folder / FOLDER
-    placed = [p for p in layout(project) if (out / p.track.file).is_file()]
+    placed = [p for p in layout(project) if music_library.file_of(p.track, out).is_file()]
     if not placed:
         return None
     target = narration_loudness(project, folder) - project.settings.music_level
@@ -333,7 +333,7 @@ def build_track(project: Project, folder: Path) -> Path | None:
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
     graph = []
     for i, p in enumerate(placed):
-        command += ["-ss", f"{p.track.start:.3f}", "-t", f"{p.length:.3f}", "-i", str(out / p.track.file)]
+        command += ["-ss", f"{p.track.start:.3f}", "-t", f"{p.length:.3f}", "-i", str(music_library.file_of(p.track, out))]
         gain = target - (p.track.loudness if p.track.loudness is not None else target)
         delay = int(round(p.at * 1000))
         # equal-power fades: two tracks crossing keep the level steady
@@ -414,6 +414,8 @@ def _collect(client: Lumean, order: dict, block: MusicBlock, out: Path, project:
             start=start, end=end, loudness=loudness(out / name, start, end - start),
         )
         track.library_id = music_library.add(project, block, track, out / name) or ""
+        if music_library.file_of(track, out) != out / name:
+            (out / name).unlink()  # filed in the library: played from there
         block.tracks.append(track)
         added += 1
     return added

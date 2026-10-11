@@ -42,6 +42,58 @@ function ProjectProgress({ p }: { p: EditorProjectSummary }) {
   );
 }
 
+function DeleteProjectDialog({ project, onClose }: { project: EditorProjectSummary; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const remove = useMutation({
+    mutationFn: () => api.deleteEditorProject(project.id),
+    onSuccess: (result) => {
+      queryClient.invalidateQueries({ queryKey: ["editorProjects"] });
+      if (result.left.length === 0) onClose();
+    },
+  });
+  const running = project.job?.status === "running";
+  const left = remove.data?.left ?? [];
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}
+      onClick={() => !remove.isPending && onClose()}
+    >
+      <div className="card" style={{ width: "460px", maxWidth: "calc(100vw - 32px)" }} onClick={(e) => e.stopPropagation()}>
+        <h3 style={{ marginTop: 0 }}>Delete video?</h3>
+        {left.length > 0 ? (
+          <p style={{ marginTop: 0 }}>
+            The video is deleted, but {left.length} file{left.length === 1 ? " is" : "s are"} still open somewhere and could not be removed
+            - close {left.length === 1 ? "it" : "them"} and delete the folder by hand: <code style={{ wordBreak: "break-all" }}>{left[0]}</code>
+          </p>
+        ) : (
+          <p style={{ marginTop: 0 }}>
+            <b>{project.title}</b> will be deleted with its folder: narration, voice-over, quotes, rendered clips and the finished
+            video. This cannot be undone. Its music stays in the music library.
+          </p>
+        )}
+        {running && <p className="error-text">A stage is running - wait for it to finish.</p>}
+        {remove.isError && <p className="error-text">{(remove.error as Error).message}</p>}
+        <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end" }}>
+          {left.length > 0 ? (
+            <button className="primary" autoFocus onClick={onClose}>
+              Close
+            </button>
+          ) : (
+            <>
+              <button className="ghost" autoFocus onClick={onClose} disabled={remove.isPending}>
+                Cancel
+              </button>
+              <button className="danger" onClick={() => remove.mutate()} disabled={running || remove.isPending}>
+                {remove.isPending ? "Deleting…" : "Delete"}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ProjectsRootCard({ root }: { root: string | null }) {
   const queryClient = useQueryClient();
   const [value, setValue] = useState(root ?? "");
@@ -368,6 +420,7 @@ export default function EditorPage() {
   });
 
   const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState<EditorProjectSummary | null>(null);
 
   if (!settings) return <p>Loading…</p>;
 
@@ -398,6 +451,7 @@ export default function EditorPage() {
                     <th>Length</th>
                     <th>Progress</th>
                     <th>Created</th>
+                    <th />
                   </tr>
                 </thead>
                 <tbody>
@@ -411,6 +465,11 @@ export default function EditorPage() {
                         <ProjectProgress p={p} />
                       </td>
                       <td>{new Date(p.created_at).toLocaleDateString()}</td>
+                      <td style={{ textAlign: "right" }}>
+                        <button className="ghost small" title="Delete this video" onClick={() => setDeleting(p)}>
+                          Delete
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -418,6 +477,7 @@ export default function EditorPage() {
             )}
           </div>
           {creating && <NewProjectModal onClose={() => setCreating(false)} />}
+          {deleting && <DeleteProjectDialog project={deleting} onClose={() => setDeleting(null)} />}
         </>
       )}
     </div>

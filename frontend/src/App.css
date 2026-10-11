@@ -421,6 +421,16 @@ button.ghost:hover {
   color: var(--text-primary);
 }
 
+button.danger {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: white;
+}
+
+button.danger:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+
 button.small {
   padding: 0.22rem 0.45rem;
   font-size: 0.8rem;
