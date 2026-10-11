@@ -7,10 +7,10 @@ set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUN_DIR="$ROOT_DIR/.run"
-# the index lives outside the code: DATA_DIR in backend/.env (see app/config.py)
-DATA_DIR="$(grep -E '^DATA_DIR=' "$ROOT_DIR/backend/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r"')"
-DATA_DIR="${DATA_DIR:-$ROOT_DIR/backend/data}"
-mkdir -p "$RUN_DIR" "$DATA_DIR"
+# the data lives outside the code: ROOT_DIR in backend/.env (see app/config.py)
+DATA_ROOT="$(grep -E '^ROOT_DIR=' "$ROOT_DIR/backend/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\r"')"
+LOGS_DIR="${DATA_ROOT:-$ROOT_DIR/backend/data}/index/logs"
+mkdir -p "$RUN_DIR" "$LOGS_DIR"
 
 BACKEND_PID_FILE="$RUN_DIR/backend.pid"
 FRONTEND_PID_FILE="$RUN_DIR/frontend.pid"
@@ -26,12 +26,12 @@ else
   (
     cd "$ROOT_DIR/backend" || exit 1
     nohup .venv/Scripts/python.exe -m uvicorn app.main:app --port 8000 \
-      > "$DATA_DIR/uvicorn.log" 2>&1 &
+      > "$LOGS_DIR/uvicorn.log" 2>&1 &
     echo $! > "$BACKEND_PID_FILE"
   )
   disown -a 2>/dev/null
   sleep 1
-  echo "Backend started (pid $(cat "$BACKEND_PID_FILE" 2>/dev/null)), log: $DATA_DIR/uvicorn.log"
+  echo "Backend started (pid $(cat "$BACKEND_PID_FILE" 2>/dev/null)), log: $LOGS_DIR/uvicorn.log"
 fi
 
 if is_running "$FRONTEND_PID_FILE"; then

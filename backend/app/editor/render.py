@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter
 
-from app.config import DATA_DIR, data_path
+from app.config import CACHE_DIR, LIBRARY_DIR, data_path, media_stored, stored_path
 from app.editor import bgtrack, store
 from app.editor.store import Candidate, Project, Quote, RenderSettings
 
@@ -56,11 +56,10 @@ STILL_MOVES = {
 # the crop's whole-pixel steps are a fraction of a pixel on screen (no judder)
 STILL_UPSCALE = 3
 
-FRAMES_DIR_NAME = "_frames"
 BORDER_FRAME = "border"
 NO_FRAME = "none"
 
-CROP_CACHE_PATH = DATA_DIR / "editor_crop_cache.json"
+CROP_CACHE_PATH = CACHE_DIR / "crop.json"
 _crop_lock = threading.Lock()
 
 
@@ -120,7 +119,7 @@ def source_crop(path: str) -> tuple[int, int, int, int]:
     stored in a 16:9 file with black bars at the sides; without this the bars would
     be scaled into the frame as part of the clip. Measured once per file."""
     stat = Path(path).stat()
-    key = f"{path}|{stat.st_size}|{int(stat.st_mtime)}"
+    key = f"{media_stored(path)}|{stat.st_size}|{int(stat.st_mtime)}"
     with _crop_lock:
         cache = json.loads(CROP_CACHE_PATH.read_text(encoding="utf-8")) if CROP_CACHE_PATH.exists() else {}
     if key in cache:
@@ -154,8 +153,8 @@ def source_crop(path: str) -> tuple[int, int, int, int]:
 
 
 def frames_dir() -> Path:
-    path = store.root_dir() / FRAMES_DIR_NAME
-    path.mkdir(exist_ok=True)
+    path = LIBRARY_DIR / "frames"
+    path.mkdir(parents=True, exist_ok=True)
     return path
 
 
@@ -215,7 +214,7 @@ def prepare_frame(settings: RenderSettings, cache_dir: Path) -> tuple[Path | Non
             raise RuntimeError(f"Frame image not found: {source}")
         stat = source.stat()
         tag = hashlib.sha1(
-            f"{source}|{stat.st_size}|{int(stat.st_mtime)}|{ENCODE_VERSION}|{frame_scale:.3f}|window-v2".encode()
+            f"{source.name}|{stat.st_size}|{int(stat.st_mtime)}|{ENCODE_VERSION}|{frame_scale:.3f}|window-v2".encode()
         ).hexdigest()[:12]
         out, meta = cache_dir / f"frame_{tag}.png", cache_dir / f"frame_{tag}.json"
         if out.exists() and meta.exists():
@@ -394,7 +393,7 @@ def _comic_args(
     # the page image itself may change (a watermark cut off it): its size tells
     stamp = Path(candidate.image_path).stat().st_size
     identity = {
-        "comic": candidate.image_path, "stamp": stamp, "frames": frames, "width": width, "blur": settings.blur,
+        "comic": stored_path(candidate.image_path), "stamp": stamp, "frames": frames, "width": width, "blur": settings.blur,
         "dim": settings.dim, "v": ENCODE_VERSION, "upward": upward,
     }
     if moved < travel:
@@ -404,7 +403,7 @@ def _comic_args(
         # screen is a window moving down the page (exact: a pixel at a time, not two).
         graph = f"[0:v]{page},crop={WIDTH}:{HEIGHT}:0:'-({y})':exact=1[out]"
         identity = {
-            "comic": candidate.image_path, "stamp": stamp, "frames": frames, "width": width, "v": ENCODE_VERSION,
+            "comic": stored_path(candidate.image_path), "stamp": stamp, "frames": frames, "width": width, "v": ENCODE_VERSION,
             "upward": upward, **({"moved": moved} if moved < travel else {}),
         }
         return [*inputs, "-filter_complex", graph, "-map", "[out]", *encode], identity
@@ -443,7 +442,7 @@ def _photo_args(
     progress = f"min(1,t/{seconds:.4f})"
     eased = f"({progress}*{progress}*(3-2*{progress}))"
     inputs = ["-framerate", _rate(factor), "-i", candidate.image_path]
-    identity = {"photo": candidate.image_path, "frames": frames, "v": ENCODE_VERSION}
+    identity = {"photo": Path(candidate.image_path).name, "frames": frames, "v": ENCODE_VERSION}
     if photo_w / photo_h >= 1.5:
         # cover the screen with a little to spare, and pan across that spare width
         scale = max(WIDTH / photo_w, HEIGHT / photo_h) * 1.08
@@ -504,7 +503,7 @@ def still_time(candidate: Candidate) -> float:
 def still_move(candidate: Candidate, previous: str | None) -> str:
     """The camera move over a still: fixed by the frame itself, so a re-render keeps
     it, and never the same as the still just before it."""
-    seed = int(hashlib.sha1(f"{candidate.file_path}|{still_time(candidate)}".encode()).hexdigest(), 16)
+    seed = int(hashlib.sha1(f"{media_stored(candidate.file_path)}|{still_time(candidate)}".encode()).hexdigest(), 16)
     names = list(STILL_MOVES)
     move = names[seed % len(names)]
     if move == previous:
@@ -616,7 +615,7 @@ def _rate_segment_args(
     base = f"fps={FPS_NUM}/{FPS_DEN},{hold}setpts=PTS-STARTPTS,crop={cw}:{ch}:{cx}:{cy},setsar=1"
     seek = ["-ss", f"{candidate.clip_start + held_start / FPS:.3f}", "-i", candidate.file_path]
     identity = {
-        "file": candidate.file_path, "start": candidate.clip_start, "frames": frames,
+        "file": media_stored(candidate.file_path), "start": candidate.clip_start, "frames": frames,
         "crop": [cw, ch, cx, cy], "layout": settings.layout, "v": ENCODE_VERSION,
     }
     if hold:
@@ -736,7 +735,7 @@ def _placeholder(fmt: str) -> str:
     """A stand-in clip of the given format: a soft gradient with a grid, so the
     edges and proportions of the picture area are easy to see."""
     width, height = PLACEHOLDER_SIZES[fmt]
-    path = DATA_DIR / f"editor_placeholder_{width}x{height}.mp4"
+    path = CACHE_DIR / f"editor_placeholder_{width}x{height}.mp4"
     if not path.exists():
         _run([
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi",

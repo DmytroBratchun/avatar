@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import delete, select
 
-from app.config import DATA_DIR
+from app.config import BACKUPS_DIR
 from app.db.models import Scene, Source, TranscriptLine, WikiEntry
 from app.db.session import SessionLocal, init_db
 from app.services.universes import all_universes
@@ -145,7 +145,8 @@ def main() -> None:
         print(f"{key}: {value}")
     if args.apply and removed_log:
         stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        path = DATA_DIR / f"transcript_lines_removed_{stamp}.json"
+        BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
+        path = BACKUPS_DIR / f"transcript_lines_removed_{stamp}.json"
         path.write_text(json.dumps(removed_log, indent=1, ensure_ascii=False), encoding="utf-8")
         print(f"Removed lines written to {path}")
     if not args.apply:

@@ -379,14 +379,13 @@ def _from_library(project: Project, blocks: list[MusicBlock], out: Path, only: b
     are. A track plays once in a video. Returns how many were taken."""
     if music_library.root() is None:
         return 0
-    universe = store.project_universe(project).id or "other"
     at_least = music_library.LIBRARY_ONLY_SIMILARITY if only else music_library.REUSE_SIMILARITY
     in_video = {music_library.library_id(t, out) for b in blocks for t in b.tracks}
     taken = 0
     for block in blocks:
         if covered(block) >= needed(block):
             continue
-        for _, entry in music_library.similar(universe, block.prompt, at_least):
+        for _, entry in music_library.similar(block.prompt, at_least):
             if covered(block) >= needed(block):
                 break
             if entry.id in in_video or entry.id in block.avoid:

@@ -7,23 +7,40 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
-def _data_dir() -> Path:
-    """Where the index lives - the database, keyframes, audio, comic pages, caches:
-    DATA_DIR from the environment or backend/.env, else backend/data. Kept apart
-    from the code; files in it are stored relative to it (see data_path)."""
-    value = os.environ.get("DATA_DIR") or dotenv_values(BACKEND_DIR / ".env").get("DATA_DIR")
+def _root_dir() -> Path:
+    """The one folder everything the app keeps lives in, apart from the code:
+    ROOT_DIR from the environment or backend/.env, else backend/data. Inside it:
+
+        index/     the database, keyframes, audio, comic pages, settings, logs, caches
+        media/     the source videos and PDFs, one folder per universe
+        library/   what videos share: music, frame images, sound effects
+        projects/  the video editor's projects
+
+    Paths to anything in it are stored relative (see data_path, media_path), so the
+    whole folder can be moved by changing ROOT_DIR alone."""
+    value = os.environ.get("ROOT_DIR") or dotenv_values(BACKEND_DIR / ".env").get("ROOT_DIR")
     return Path(value).expanduser().resolve() if value else BACKEND_DIR / "data"
 
 
-DATA_DIR = _data_dir()
+ROOT_DIR = _root_dir()
+DATA_DIR = ROOT_DIR / "index"
+MEDIA_DIR = ROOT_DIR / "media"
+LIBRARY_DIR = ROOT_DIR / "library"
+PROJECTS_DIR = ROOT_DIR / "projects"
 KEYFRAMES_DIR = DATA_DIR / "keyframes"
 AUDIO_DIR = DATA_DIR / "audio"
+# logs, worker heartbeats and pid files
+LOGS_DIR = DATA_DIR / "logs"
+# what can be made or downloaded again: frame grabs, crop measurements, wiki pages
+CACHE_DIR = DATA_DIR / "cache"
+# copies of the database and of data taken out of it, kept before risky changes
+BACKUPS_DIR = DATA_DIR / "backups"
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=BACKEND_DIR / ".env", extra="ignore")
 
-    database_path: Path = DATA_DIR / "avatar.db"
+    database_path: Path = DATA_DIR / "index.db"
     anthropic_api_key: str = ""
     caption_provider: str = "claude_code"  # "claude_code" (uses your Claude subscription via headless CLI) | "api" (metered ANTHROPIC_API_KEY)
     caption_model: str = "claude-opus-5"
@@ -48,6 +65,13 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
+def _relative(path: str | Path, base: Path) -> str:
+    try:
+        return Path(path).resolve().relative_to(base.resolve()).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def data_path(stored: str | Path) -> Path:
     """A file the app made in DATA_DIR, as the database or a project stores it:
     relative to DATA_DIR. (A path stored absolute is taken as it is.)"""
@@ -56,12 +80,23 @@ def data_path(stored: str | Path) -> Path:
 
 
 def stored_path(path: str | Path) -> str:
-    """How a file inside DATA_DIR is stored: relative to it, with forward slashes,
-    so the folder can be moved by changing DATA_DIR alone."""
-    try:
-        return Path(path).resolve().relative_to(DATA_DIR.resolve()).as_posix()
-    except ValueError:
-        return str(path)
+    """How a file inside DATA_DIR is stored: relative to it, with forward slashes."""
+    return _relative(path, DATA_DIR)
 
-for directory in (DATA_DIR, KEYFRAMES_DIR, AUDIO_DIR):
+
+def media_path(stored: str) -> str:
+    """A source video or PDF as the database or a project stores it - relative to
+    MEDIA_DIR - as a full path. (One stored absolute, outside MEDIA_DIR, as it is.)"""
+    if not stored or Path(stored).is_absolute():
+        return stored
+    return str(MEDIA_DIR / stored)
+
+
+def media_stored(path: str) -> str:
+    """How a source file is stored: relative to MEDIA_DIR when it lies in it. Also
+    the name to hash it by, so caches survive moving the media folder."""
+    return _relative(path, MEDIA_DIR) if path and Path(path).is_absolute() else path
+
+
+for directory in (DATA_DIR, KEYFRAMES_DIR, AUDIO_DIR, LOGS_DIR, CACHE_DIR):
     directory.mkdir(parents=True, exist_ok=True)

@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.config import DATA_DIR, data_path
+from app.config import CACHE_DIR, data_path, media_stored
 from app.db.models import Scene, Source
 from app.db.session import get_db
 
@@ -54,7 +54,7 @@ def stream_source(source_id: int, request: Request, db: Session = Depends(get_db
     return StreamingResponse(iterator(), status_code=206, media_type=media_type, headers=headers)
 
 
-FRAME_CACHE_DIR = DATA_DIR / "frame_cache"
+FRAME_CACHE_DIR = CACHE_DIR / "frames"
 
 
 def frame_jpeg(video_path: str, at: float, width: int) -> Path:
@@ -63,10 +63,10 @@ def frame_jpeg(video_path: str, at: float, width: int) -> Path:
     import subprocess
 
     width = max(160, min(1920, width // 2 * 2))
-    key = hashlib.sha1(f"{video_path}|{at:.3f}|{width}".encode()).hexdigest()[:20]
+    key = hashlib.sha1(f"{media_stored(video_path)}|{at:.3f}|{width}".encode()).hexdigest()[:20]
     path = FRAME_CACHE_DIR / f"{key}.jpg"
     if not path.exists():
-        FRAME_CACHE_DIR.mkdir(exist_ok=True)
+        FRAME_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         partial = path.with_suffix(".part.jpg")
         result = subprocess.run(
             ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{max(0.0, at):.3f}", "-i", video_path,

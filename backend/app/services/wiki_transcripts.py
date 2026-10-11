@@ -8,7 +8,7 @@ wiki line its words belong to. A description sits between two spoken lines and g
 the gap between them as its time range.
 
 Pages are fetched through the MediaWiki API of the universe's wiki (plain page
-requests are refused) and cached under backend/data/wiki_transcripts/.
+requests are refused) and cached under <root>/index/cache/wiki_transcripts/.
 """
 
 import collections
@@ -21,9 +21,9 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 
-from app.config import DATA_DIR
+from app.config import CACHE_DIR as _CACHE_ROOT
 
-CACHE_DIR = DATA_DIR / "wiki_transcripts"
+CACHE_DIR = _CACHE_ROOT / "wiki_transcripts"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 MIN_LINES_PER_PAGE = 20  # fewer spoken lines than this is not an episode transcript
 # a wiki line counts as found when this share of its words matched

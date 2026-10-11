@@ -21,7 +21,7 @@ import os
 import threading
 import time
 
-from app.config import DATA_DIR
+from app.config import LOGS_DIR
 from app.db.session import SessionLocal, init_db
 from app.pipeline.runner import (
     paused_sources,
@@ -35,11 +35,11 @@ from app.pipeline.runner import (
     visual_reindex_queue,
 )
 
-LOG_PATH = DATA_DIR / "local_worker.log"
-HEARTBEAT_PATH = DATA_DIR / "local_worker_heartbeat.json"
+LOG_PATH = LOGS_DIR / "local_worker.log"
+HEARTBEAT_PATH = LOGS_DIR / "local_worker_heartbeat.json"
 POLL_INTERVAL_SECONDS = 5
 HEARTBEAT_REFRESH_SECONDS = 10
-PAID_HEARTBEAT_PATH = DATA_DIR / "worker_heartbeat.json"
+PAID_HEARTBEAT_PATH = LOGS_DIR / "worker_heartbeat.json"
 PAID_HEARTBEAT_STALE_SECONDS = 30
 
 # Own handlers (not logging.basicConfig) so this keeps logging to local_worker.log

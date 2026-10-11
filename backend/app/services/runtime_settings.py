@@ -11,7 +11,7 @@ import sys
 import threading
 from pathlib import Path
 
-from app.config import DATA_DIR, settings
+from app.config import DATA_DIR, LIBRARY_DIR, PROJECTS_DIR, settings
 
 SETTINGS_PATH = DATA_DIR / "settings.json"
 _lock = threading.Lock()
@@ -81,9 +81,9 @@ def update_settings(
 
 
 def editor_projects_root() -> str | None:
-    """Folder holding one sub-folder per video-editor project. No default - the
-    user picks where their projects live."""
-    return _read_raw().get("editor_projects_root") or None
+    """Folder holding one sub-folder per video-editor project: <root>/projects,
+    unless the user picked another."""
+    return _read_raw().get("editor_projects_root") or str(PROJECTS_DIR)
 
 
 def set_editor_projects_root(path: str) -> None:
@@ -139,10 +139,10 @@ def set_editor_default_look(look: dict) -> None:
 
 
 def editor_music_library() -> str | None:
-    """Folder of the music library - every composed track with its prompt, kept in
-    the media folder for later videos to reuse ("music_library" in settings.json).
-    Without it nothing is kept or reused."""
-    return _read_raw().get("music_library") or None
+    """Folder of the music library - every composed track with its prompt, kept for
+    later videos to reuse: <root>/library/music, unless settings.json names another
+    ("music_library")."""
+    return _read_raw().get("music_library") or str(LIBRARY_DIR / "music")
 
 
 def editor_default_visual_notes() -> str:

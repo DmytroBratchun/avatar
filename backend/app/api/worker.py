@@ -6,12 +6,12 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from app.config import BACKEND_DIR, DATA_DIR
+from app.config import BACKEND_DIR, LOGS_DIR
 
 router = APIRouter(prefix="/api/worker", tags=["worker"])
 
 STALE_AFTER_SECONDS = 30
-WORKER_PID_FILE = DATA_DIR / "worker.pid"
+WORKER_PID_FILE = LOGS_DIR / "worker.pid"
 
 
 def _read_heartbeat(path: Path) -> dict:
@@ -44,13 +44,13 @@ def _read_heartbeat(path: Path) -> dict:
 @router.get("/status")
 def worker_status() -> dict:
     """Main worker - runs the full pipeline including paid captioning."""
-    return _read_heartbeat(DATA_DIR / "worker_heartbeat.json")
+    return _read_heartbeat(LOGS_DIR / "worker_heartbeat.json")
 
 
 @router.get("/local-status")
 def local_worker_status() -> dict:
     """Local-only worker - transcribe/shots/scenes/keyframes, never calls the API."""
-    return _read_heartbeat(DATA_DIR / "local_worker_heartbeat.json")
+    return _read_heartbeat(LOGS_DIR / "local_worker_heartbeat.json")
 
 
 def _pid_is_alive(pid: int) -> bool:
@@ -81,7 +81,7 @@ def _mark_stopped() -> None:
     """A killed worker can't update its own heartbeat, and the old one keeps looking
     alive for another 30s - so say it was stopped."""
     payload = {"status": "stopped", "last_seen": dt.datetime.now(dt.timezone.utc).isoformat()}
-    (DATA_DIR / "worker_heartbeat.json").write_text(json.dumps(payload), encoding="utf-8")
+    (LOGS_DIR / "worker_heartbeat.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
 @router.post("/start")

@@ -53,7 +53,7 @@ export default function DatabasePage() {
     <div>
       <h1>Database</h1>
       <p className="hint" style={{ marginTop: "-0.5rem" }}>
-        Read-only view into <code>backend/data/avatar.db</code>. Browse a table, or run a custom SELECT.
+        Read-only view into <code>index/index.db</code>. Browse a table, or run a custom SELECT.
       </p>
 
       <div className="card">

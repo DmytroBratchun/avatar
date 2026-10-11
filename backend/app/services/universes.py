@@ -5,7 +5,7 @@ its name, what it is, which shows belong to it, its regions, what its scenery lo
 like - so the prompts themselves stay generic. Working with a new world means
 adding one entry, not rewriting prompts.
 
-The entries are kept in backend/data/universes.json (created from the built-in
+The entries are kept in <root>/index/universes.json (created from the built-in
 defaults on first use) so they can be edited without touching code.
 """
 

@@ -7,7 +7,7 @@ One folder per project under the user-chosen root:
         transcript.json   - word-level timestamps of the narration
         <audio file>      - the narration, copied in on upload
 
-The editor never writes to avatar.db - it only reads the index through search.
+The editor never writes to the index database - it only reads the index through search.
 """
 
 import datetime as dt
@@ -18,8 +18,9 @@ import threading
 import time
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer, model_validator
 
+from app.config import media_path, media_stored
 from app.services.runtime_settings import editor_default_look, editor_projects_root
 from app.services.universes import Universe, all_universes, get_universe, universe_for_show
 
@@ -40,6 +41,23 @@ class RootNotConfigured(Exception):
     pass
 
 
+class MediaFile(BaseModel):
+    """A model holding a source video or PDF in file_path: saved relative to
+    MEDIA_DIR, so the media folder can be moved, and a full path once loaded. (A
+    photo's file_path is relative to its project's folder and is left alone.)"""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _full_media_path(cls, data):
+        if isinstance(data, dict) and data.get("kind") != "photo" and isinstance(data.get("file_path"), str):
+            data = {**data, "file_path": media_path(data["file_path"])}
+        return data
+
+    @field_serializer("file_path", check_fields=False)
+    def _stored_media_path(self, value: str) -> str:
+        return media_stored(value)
+
+
 class Word(BaseModel):
     text: str
     start: float
@@ -58,7 +76,7 @@ class Segment(BaseModel):
     audio_end: float
 
 
-class Candidate(BaseModel):
+class Candidate(MediaFile):
     """One piece of footage that could fill a slot. Carries the file path and
     times itself - scene ids change when an episode is re-indexed, so scene_id is
     only a hint for thumbnails and de-duplication."""
@@ -122,7 +140,7 @@ class Slot(BaseModel):
     locked: bool = False  # chosen by the user - automatic selection leaves it alone
 
 
-class Background(BaseModel):
+class Background(MediaFile):
     """One calm scenery shot shown blurred behind the frame. Like Candidate, it
     carries the file path and times rather than relying on scene_id."""
 
@@ -192,7 +210,7 @@ class QuotePart(BaseModel):
     speech_end: float | None = None  # where its last word stops, in episode time
 
 
-class Quote(BaseModel):
+class Quote(MediaFile):
     """A clip of dialogue from the show, played with its own sound between two
     pieces of narration. Only "approved" quotes are part of the video."""
 
@@ -243,7 +261,7 @@ class RenderSettings(BaseModel):
     # footage around the moment that was actually searched for.
     max_clip_seconds: float = 7.0
     # framed layout only. frame: "border" (plain outline), "none", or the name of a
-    # PNG in <projects root>/_frames whose transparent opening the clip sits under
+    # PNG in <root>/library/frames whose transparent opening the clip sits under
     frame: str = "border"
     clip_height: float = 0.75  # share of the screen height, for "border"/"none"; image frames define their own
     blur: float = 15.0  # background blur, 0-100

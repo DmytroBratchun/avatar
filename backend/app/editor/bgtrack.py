@@ -13,6 +13,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.config import media_stored
 from app.editor.store import Background
 
 FPS_NUM, FPS_DEN = 24000, 1001
@@ -70,7 +71,7 @@ def slice_identity(placed: list[Placed], start: int, frames: int, speed: float =
     """What the track shows during [start, start+frames), in terms that don't change
     when an unrelated part of the video does - used in a clip's cache key."""
     return [
-        [p.clip.file_path, p.clip.clip_start, p.start - start, p.frames, p.hold, speed]
+        [media_stored(p.clip.file_path), p.clip.clip_start, p.start - start, p.frames, p.hold, speed]
         for p in placed
         if p.start < start + frames and p.start + p.frames + p.hold > start
     ]
@@ -130,7 +131,7 @@ def pieces(
         alone = p.frames - head - tail + p.hold
         graph = _prep(crop, speed) + (f",tpad=stop_mode=clone:stop={p.hold}" if p.hold else "")
         piece(
-            {"v": TRACK_VERSION, "alone": [p.clip.file_path, p.clip.clip_start, head, alone, p.hold], "crop": crop, "speed": speed},
+            {"v": TRACK_VERSION, "alone": [media_stored(p.clip.file_path), p.clip.clip_start, head, alone, p.hold], "crop": crop, "speed": speed},
             ["-ss", f"{p.clip.clip_start + head / FPS * speed:.3f}", "-i", p.clip.file_path, "-vf", graph, *_encode(alone)],
             p.start + head, alone,
         )
@@ -145,7 +146,7 @@ def pieces(
             piece(
                 {
                     "v": TRACK_VERSION,
-                    "fade": [p.clip.file_path, round(out_start, 3), following.clip.file_path, following.clip.clip_start],
+                    "fade": [media_stored(p.clip.file_path), round(out_start, 3), media_stored(following.clip.file_path), following.clip.clip_start],
                     "crop": [crop, next_crop],
                     "speed": speed,
                 },

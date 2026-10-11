@@ -20,11 +20,11 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.config import DATA_DIR
+from app.config import CACHE_DIR as _CACHE_ROOT
 from app.db.models import Source, WikiEntry
 from app.services.wiki_transcripts import USER_AGENT, tokens
 
-CACHE_DIR = DATA_DIR / "quote_sources"
+CACHE_DIR = _CACHE_ROOT / "quote_sources"
 # a collected quote counts as found when this share of its words is in the matched line(s)
 MIN_MATCH = 0.7
 # a collected exchange longer than this is cut into several clips

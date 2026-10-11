@@ -1,11 +1,13 @@
 """The music library: every track composed for a video, kept with the prompt it was
 made from, so a later video can use it instead of ordering new music.
 
-It lives in the media folder, outside any project: `music_library` in
-settings.json names the folder (no folder - no library). Tracks are filed by
-universe, <library>/<universe id>/<file>, and listed in <library>/library.json.
-The prompts describe a sound and a mood, with no names or plot, so a track fits
-any video of the same universe whose block asks for much the same.
+It lives outside any project, in <root>/library/music (`music_library` in
+settings.json can name another folder): every track in one folder, named by a
+hash of its audio, and listed in <library>/library.json with the universe it was
+composed for. The prompts describe a sound and a mood, with no names or plot, and
+a track is offered to any video whose block asks for much the same - of any
+universe: a prompt names its world's instruments, so another world's track is
+only as close as its sound is.
 
 A block takes tracks from the library in two cases: when one was made from a
 prompt almost the same as its own (REUSE_SIMILARITY - then composing again would
@@ -116,8 +118,8 @@ def add(project: Project, block: MusicBlock, track: MusicTrack, source: Path) ->
         known = _load(folder)
         entry = next((t for t in known if t.id == track_id), None)
         if entry is None:
-            name = f"{universe}/{track_id}{source.suffix}"
-            (folder / universe).mkdir(parents=True, exist_ok=True)
+            name = f"{track_id}{source.suffix}"
+            folder.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, folder / name)
             entry = LibraryTrack(
                 id=track_id, file=name, universe=universe, prompt=block.prompt, mood=block.mood,
@@ -163,8 +165,8 @@ def forget_project(project_id: str, keep: set[str]) -> None:
             _save(folder, known)
 
 
-def similar(universe: str, prompt: str, at_least: float) -> list[tuple[float, LibraryTrack]]:
-    """The library's tracks of this universe whose prompt is at least this like the
+def similar(prompt: str, at_least: float) -> list[tuple[float, LibraryTrack]]:
+    """The library's tracks whose prompt is at least this like the
     given one: the closest prompt first, and among tracks of one prompt the one
     used in the fewest videos."""
     from app.services.embeddings import embed_text
@@ -172,7 +174,7 @@ def similar(universe: str, prompt: str, at_least: float) -> list[tuple[float, Li
     folder = root()
     if folder is None:
         return []
-    candidates = [t for t in _load(folder) if t.universe == universe and not t.rejected and (folder / t.file).is_file()]
+    candidates = [t for t in _load(folder) if not t.rejected and (folder / t.file).is_file()]
     if not candidates or not prompt.strip():
         return []
     def vector(text: str) -> np.ndarray:

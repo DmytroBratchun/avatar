@@ -9,9 +9,12 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    TypeDecorator,
     UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+from app.config import media_path, media_stored
 
 
 class Base(DeclarativeBase):
@@ -22,11 +25,25 @@ def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
+class MediaPath(TypeDecorator):
+    """A source file's path: stored relative to MEDIA_DIR, so the media folder can
+    be moved, and read back as a full path."""
+
+    impl = String
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return media_stored(value) if value is not None else None
+
+    def process_result_value(self, value, dialect):
+        return media_path(value) if value is not None else None
+
+
 class Source(Base):
     __tablename__ = "sources"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    file_path: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    file_path: Mapped[str] = mapped_column(MediaPath, unique=True, nullable=False)
     # "video" (an episode or film) or "comic" (a PDF whose pages are indexed like
     # scenes, see services/comics.py)
     kind: Mapped[str] = mapped_column(String, default="video", server_default="video", nullable=False)

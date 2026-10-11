@@ -1,7 +1,7 @@
 """Standard sound effects - a page turning when a comic page comes on screen, a
 camera shutter for a photo. Each is generated once through Lumean (a few variants,
 so the same one is not heard every time) into a library shared by all projects,
-<projects root>/_sounds/, and reused from there.
+<root>/library/sounds/, and reused from there.
 
 At render time the effects are laid on the narration's clock, at the start of
 every slot that shows a comic page or a photo, and mixed into the narration
@@ -19,11 +19,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from app.editor import store
+from app.config import LIBRARY_DIR
 from app.editor.store import Project
 from app.services.lumean import Lumean, LumeanError
 
-DIR_NAME = "_sounds"
 LIBRARY_FILE = "sounds.json"
 VARIANTS = 3
 # every variant is brought to this peak, then played sfx_volume dB below it
@@ -57,8 +56,8 @@ BY_NAME = {sound.name: sound for sound in STANDARD}
 
 
 def library_dir() -> Path:
-    path = store.root_dir() / DIR_NAME
-    path.mkdir(exist_ok=True)
+    path = LIBRARY_DIR / "sounds"
+    path.mkdir(parents=True, exist_ok=True)
     return path
 
 

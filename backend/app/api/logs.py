@@ -3,15 +3,15 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 
-from app.config import BACKEND_DIR, DATA_DIR
+from app.config import BACKEND_DIR, LOGS_DIR
 
 router = APIRouter(prefix="/api/logs", tags=["logs"])
 
 # Fixed set - the name in the URL is only ever a key into this, never a path.
 LOG_FILES: dict[str, tuple[str, Path]] = {
-    "captioning": ("Captioning worker (paid)", DATA_DIR / "worker.log"),
-    "local": ("Local worker (free)", DATA_DIR / "local_worker.log"),
-    "backend": ("Backend / API / editor", DATA_DIR / "uvicorn.log"),
+    "captioning": ("Captioning worker (paid)", LOGS_DIR / "worker.log"),
+    "local": ("Local worker (free)", LOGS_DIR / "local_worker.log"),
+    "backend": ("Backend / API / editor", LOGS_DIR / "uvicorn.log"),
     "frontend": ("Frontend dev server", BACKEND_DIR.parent / ".run" / "frontend.log"),
 }
 MAX_LINES = 2000
