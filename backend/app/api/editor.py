@@ -781,6 +781,8 @@ def candidate_still(project_id: str, beat_id: str, slot_index: int, index: int, 
     if beat is None or not 0 <= slot_index < len(beat.slots) or not 0 <= index < len(beat.slots[slot_index].candidates):
         raise HTTPException(404, "No such candidate")
     candidate = beat.slots[slot_index].candidates[index]
+    if candidate.kind == "map" and candidate.map is not None:
+        return _map_still(candidate.map, beat.slots[slot_index], width)
     if candidate.kind != "video" or not Path(candidate.file_path).exists():
         raise HTTPException(404, "Not footage")
     at = still_time(candidate)
@@ -977,6 +979,111 @@ def set_slot_manually(project_id: str, beat_id: str, slot_index: int, payload: S
         # first in the list, so it sits where the chosen clip is shown; earlier hand
         # picks for this slot are replaced rather than piling up
         target.candidates = [candidate] + [c for c in target.candidates if c.score != 0.0 or c.text_score is not None or c.visual_score is not None]
+        target.candidates = target.candidates[:9]
+        target.selected = 0
+        target.locked = True
+
+    return store.update_project(project_id, apply)
+
+
+# --- maps -------------------------------------------------------------------------
+
+
+def _map_still(shot, slot, width: int, share: float = 0.97) -> Response:
+    """A frame of a map shot near its end - the whole way drawn, the last place named."""
+    import cv2
+
+    from app.editor import maps
+
+    try:
+        picture = maps.still(shot, max(1, round((slot.end - slot.start) * 24000 / 1001)), share)
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+    width = max(160, min(width, 1920))
+    picture = cv2.resize(picture, (width, round(width * picture.shape[0] / picture.shape[1])), interpolation=cv2.INTER_AREA)
+    ok, jpeg = cv2.imencode(".jpg", picture, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return Response(content=jpeg.tobytes(), media_type="image/jpeg")
+
+
+@router.get("/maps/{name}")
+def get_map(name: str) -> dict:
+    """A map's places and journeys, to build a map shot from."""
+    from app.editor import maps
+
+    try:
+        return maps.info(name)
+    except ValueError as error:
+        raise HTTPException(404, str(error))
+
+
+@router.get("/maps/{name}/places/{place_id}/picture")
+def get_place_picture(name: str, place_id: str):
+    from app.editor import maps
+
+    try:
+        path = maps.picture_path(name, maps.places(name).get(place_id, {}))
+    except ValueError as error:
+        raise HTTPException(404, str(error))
+    if path is None:
+        raise HTTPException(404, "This place has no picture")
+    return FileResponse(path)
+
+
+class PlacePictureIn(BaseModel):
+    # what the place looks like, for the picture; empty = by its name
+    what: str = ""
+
+
+@router.post("/maps/{name}/places/{place_id}/picture")
+def make_place_picture(name: str, place_id: str, payload: PlacePictureIn) -> dict:
+    """Draws a picture of a place in the map's style with GPT Image (paid, one
+    image) - shown in a medallion when a map shot reaches it."""
+    from app.editor import maps
+
+    try:
+        return maps.generate_picture(name, place_id, payload.what)
+    except ValueError as error:
+        raise HTTPException(404, str(error))
+    except RuntimeError as error:
+        raise HTTPException(502, str(error))
+
+
+class SlotMapIn(BaseModel):
+    places: list[str]
+    route: str = ""
+    pictures: list[str] = []
+    tilt: float = 50.0
+
+
+@router.post("/projects/{project_id}/beats/{beat_id}/slots/{slot_index}/map", response_model=Project)
+def set_slot_map(project_id: str, beat_id: str, slot_index: int, payload: SlotMapIn) -> Project:
+    """Puts a map shot into a slot - a journey drawn on the map of the project's
+    world - first among its candidates, selected and locked."""
+    from app.editor import maps
+    from app.editor.store import Candidate, MapShot
+
+    project = _editable(project_id, beat_id, slot_index)
+    universe = store.project_universe(project)
+    if universe is None or not universe.map:
+        raise HTTPException(400, "This world has no map")
+    shot = MapShot(map=universe.map, places=payload.places, route=payload.route, pictures=payload.pictures,
+                   tilt=min(70.0, max(0.0, payload.tilt)))
+    try:
+        maps.waypoints(shot)
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+    slot = next(b for b in project.beats if b.id == beat_id).slots[slot_index]
+    duration = slot.end - slot.start
+    candidate = Candidate(
+        kind="map", map=shot, scene_id=0, source_id=0, file_path="",
+        scene_start=0.0, scene_end=duration, clip_start=0.0, clip_end=round(duration, 3),
+        description=maps.describe(shot), score=0.0,
+    )
+
+    def apply(p: Project) -> None:
+        target = next(b for b in p.beats if b.id == beat_id).slots[slot_index]
+        # replaces an earlier map shot of this slot rather than piling up
+        target.candidates = [candidate] + [c for c in target.candidates if c.kind != "map"]
         target.candidates = target.candidates[:9]
         target.selected = 0
         target.locked = True

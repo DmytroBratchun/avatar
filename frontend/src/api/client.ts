@@ -211,6 +211,8 @@ export interface UniverseOut {
   comics?: string[];
   // shows whose footage the video may only show as still frames (copyright)
   still_shows?: string[];
+  // its map for map shots (a folder of the library); empty = none
+  map?: string;
 }
 
 export interface EditorWord {
@@ -231,8 +233,10 @@ export interface EditorCandidate {
   source_id: number;
   file_path: string;
   // "comic": a page of a comic (scene_start is its number from 0), shown scrolling
-  kind?: "video" | "comic" | "photo";
+  kind?: "video" | "comic" | "photo" | "map";
   image_path?: string | null;
+  // "map": a journey drawn on the map of the project's world
+  map?: EditorMapShot | null;
   // a photo's attribution, as its licence asks for it
   credit?: string | null;
   show_title: string | null;
@@ -250,6 +254,31 @@ export interface EditorCandidate {
   slivers?: number;
   // a still's frame picked by hand (seconds in the file); null = the scene's keyframe
   still_at?: number | null;
+}
+
+export interface EditorMapShot {
+  map: string;
+  places: string[];
+  route: string;
+  pictures: string[];
+  tilt: number;
+}
+
+export interface MapPlace {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  side: "good" | "evil";
+  picture?: string | null;
+}
+
+export interface MapInfo {
+  name: string;
+  title: string;
+  credit: string;
+  places: MapPlace[];
+  routes: { id: string; label: string }[];
 }
 
 export interface EditorSlot {
@@ -775,6 +804,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload),
     }),
+  setEditorSlotMap: (
+    id: string,
+    beatId: string,
+    slotIndex: number,
+    payload: { places: string[]; route: string; pictures: string[]; tilt?: number },
+  ) =>
+    request<EditorProject>(`/api/editor/projects/${id}/beats/${beatId}/slots/${slotIndex}/map`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  getMap: (name: string) => request<MapInfo>(`/api/editor/maps/${encodeURIComponent(name)}`),
+  // paid: one GPT Image picture
+  makePlacePicture: (name: string, placeId: string, what: string) =>
+    request<MapPlace>(`/api/editor/maps/${encodeURIComponent(name)}/places/${encodeURIComponent(placeId)}/picture`, {
+      method: "POST",
+      body: JSON.stringify({ what }),
+    }),
   addEditorQuote: (id: string, payload: { source_id: number; clip_start: number; clip_end: number; after_word?: number }) =>
     request<EditorProject>(`/api/editor/projects/${id}/quotes`, { method: "POST", body: JSON.stringify(payload) }),
   deleteEditorQuote: (id: string, quoteId: string) =>
@@ -846,6 +892,8 @@ export const api = {
   streamUrl: (sourceId: number) => `${BASE_URL}/api/media/${sourceId}/stream`,
   keyframeUrl: (sceneId: number, index: number) => `${BASE_URL}/api/media/scenes/${sceneId}/keyframes/${index}`,
   frameUrl: (sourceId: number, t: number, width = 320) => `${BASE_URL}/api/media/${sourceId}/frame?t=${t.toFixed(3)}&width=${width}`,
+  placePictureUrl: (name: string, placeId: string, version: string) =>
+    `${BASE_URL}/api/editor/maps/${encodeURIComponent(name)}/places/${encodeURIComponent(placeId)}/picture?v=${encodeURIComponent(version)}`,
   // the frame a candidate shows as a still; `version` changes the URL when the pick changes
   candidateStillUrl: (id: string, beatId: string, slotIndex: number, index: number, version: string, width = 720) =>
     `${BASE_URL}/api/editor/projects/${id}/beats/${beatId}/slots/${slotIndex}/candidates/${index}/still?width=${width}&v=${encodeURIComponent(version)}`,

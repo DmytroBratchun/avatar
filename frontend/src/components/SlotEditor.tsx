@@ -2,6 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { api } from "../api/client";
 import type { EditorCandidate, EditorProject, EditorSlot } from "../api/client";
+import MapShotDialog from "./MapShotDialog";
 import ScenePicker from "./ScenePicker";
 
 // the picture that stands for a candidate: a photo's own file, else the scene's keyframe
@@ -23,6 +24,7 @@ function isStill(c: EditorCandidate, stillShows: Set<string>): boolean {
 function thumbnail(
   c: EditorCandidate, projectId: string, beatId: string, slotIndex: number, index: number, stillShows: Set<string>,
 ): string {
+  if (c.kind === "map") return api.candidateStillUrl(projectId, beatId, slotIndex, index, JSON.stringify(c.map), 320);
   if (!isStill(c, stillShows)) return candidateImage(c, projectId);
   return api.candidateStillUrl(projectId, beatId, slotIndex, index, `${c.clip_start}-${c.still_at ?? "key"}`, 320);
 }
@@ -67,6 +69,7 @@ function formatSeconds(t: number): string {
 
 function episodeLabel(c: EditorCandidate): string {
   if (c.kind === "photo") return "Photo";
+  if (c.kind === "map") return "Map";
   if (c.kind === "comic") {
     return `${c.show_title ?? "Comic"}${c.episode_number != null ? ` ${c.episode_number}` : ""} p.${Math.round(c.scene_start) + 1}`;
   }
@@ -146,6 +149,7 @@ export function SlotEditor({
   slot,
   projectShows,
   projectComics = [],
+  mapName,
   disabled,
   onChange,
 }: {
@@ -156,6 +160,8 @@ export function SlotEditor({
   projectShows: string[];
   // comic series of the project's universe: their pages can be picked by hand too
   projectComics?: string[];
+  // the map of the project's world, for map shots; none = no map
+  mapName?: string;
   disabled: boolean;
   onChange: (project: EditorProject) => void;
 }) {
@@ -179,6 +185,8 @@ export function SlotEditor({
     },
   });
 
+  // a journey on the map, in a popup
+  const [mapping, setMapping] = useState(false);
   // picking footage by hand, in a popup
   const [picking, setPicking] = useState(false);
   const manualMutation = useMutation({
@@ -210,7 +218,19 @@ export function SlotEditor({
   return (
     <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap", padding: "0.5rem 0" }}>
       <div style={{ width: "360px", maxWidth: "100%" }}>
-        {selected && selected.kind === "photo" ? (
+        {selected && selected.kind === "map" && slot.selected != null ? (
+          <>
+            {/* a journey drawn on the map: its last frame, the whole way drawn */}
+            <img
+              src={api.candidateStillUrl(projectId, beatId, slotIndex, slot.selected, JSON.stringify(selected.map))}
+              alt=""
+              style={{ width: "100%", display: "block", background: "var(--bg-hover)" }}
+            />
+            <p className="hint" style={{ marginTop: "0.3rem" }}>
+              {selected.description} · drawn over {(selected.clip_end - selected.clip_start).toFixed(1)}s
+            </p>
+          </>
+        ) : selected && selected.kind === "photo" ? (
           <>
             {/* a photo from Wikimedia Commons, for a shot about the real world */}
             <img
@@ -413,6 +433,11 @@ export function SlotEditor({
           <button className="small" onClick={() => setPicking(true)} disabled={busy} title="Pick any scene of any episode yourself">
             Browse scenes…
           </button>
+          {mapName && (
+            <button className="small" onClick={() => setMapping(true)} disabled={busy} title="A journey from one place to another, drawn on the map">
+              Map…
+            </button>
+          )}
           {selected && (
             <button
               className="ghost small"
@@ -471,6 +496,17 @@ export function SlotEditor({
               {searchMutation.error && <p className="error-text">{(searchMutation.error as Error).message}</p>}
             </div>
           </div>
+        )}
+        {mapping && mapName && (
+          <MapShotDialog
+            projectId={projectId}
+            beatId={beatId}
+            slotIndex={slotIndex}
+            mapName={mapName}
+            current={selected?.kind === "map" ? selected.map : slot.candidates.find((c) => c.kind === "map")?.map}
+            onChange={onChange}
+            onClose={() => setMapping(false)}
+          />
         )}
         {picking && (
           <ScenePicker

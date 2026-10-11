@@ -209,6 +209,7 @@ function BeatRow({
   beat,
   projectShows,
   projectComics,
+  mapName,
   playing,
   onPlay,
   disabled,
@@ -217,6 +218,7 @@ function BeatRow({
   projectId: string;
   projectShows: string[];
   projectComics: string[];
+  mapName?: string;
   beat: EditorBeat;
   playing: boolean;
   onPlay: () => void;
@@ -286,6 +288,7 @@ function BeatRow({
               slot={slot}
               projectShows={projectShows}
               projectComics={projectComics}
+              mapName={mapName}
               disabled={disabled}
               onChange={onChange}
             />
@@ -744,6 +747,7 @@ export default function EditorProjectPage() {
                     beat={beat}
                     projectShows={availableShows}
                     projectComics={projectUniverse?.comics ?? []}
+                    mapName={projectUniverse?.map || undefined}
                     playing={playingBeat?.id === beat.id}
                     onPlay={() => togglePlay(beat)}
                     disabled={busy}

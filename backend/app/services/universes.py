@@ -46,6 +46,9 @@ class Universe(BaseModel):
     # what this world's music sounds like - instruments, traditions, character - for
     # composing music under a video; empty = left to what the model knows of the shows
     music_style: str = ""
+    # a map of this world for map shots: a folder under <root>/library/maps (see
+    # editor/maps.py); empty = no map
+    map: str = ""
     # MediaWiki API of a fan wiki with a "Transcript" namespace: episode transcripts
     # with speaker names and descriptions (see services/wiki_transcripts.py)
     transcripts_wiki: str | None = None

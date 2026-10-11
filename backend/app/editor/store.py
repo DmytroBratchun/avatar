@@ -51,7 +51,7 @@ class MediaFile(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _full_media_path(cls, data):
-        if isinstance(data, dict) and data.get("kind") != "photo" and isinstance(data.get("file_path"), str):
+        if isinstance(data, dict) and data.get("kind") not in ("photo", "map") and isinstance(data.get("file_path"), str):
             data = {**data, "file_path": media_path(data["file_path"])}
         return data
 
@@ -78,6 +78,16 @@ class Segment(BaseModel):
     audio_end: float
 
 
+class MapShot(BaseModel):
+    """A journey drawn on the map of the universe's world (see editor/maps.py)."""
+
+    map: str  # the map's folder under <root>/library/maps
+    places: list[str]  # place ids in the order travelled; the first and last are named
+    route: str = ""  # a journey to follow between them; empty = straight through the places
+    pictures: list[str] = Field(default_factory=list)  # places shown in a medallion
+    tilt: float = 50.0  # degrees the camera leans from looking straight down
+
+
 class Candidate(MediaFile):
     """One piece of footage that could fill a slot. Carries the file path and
     times itself - scene ids change when an episode is re-indexed, so scene_id is
@@ -94,6 +104,8 @@ class Candidate(MediaFile):
     # "photo": a photo from Wikimedia Commons (see editor/photos.py), shown still;
     # credit is the attribution its licence asks for
     credit: str | None = None
+    # "map": a journey drawn on a map, no footage (file_path empty)
+    map: MapShot | None = None
     show_title: str | None = None
     book: int | None = None
     episode_number: int | None = None

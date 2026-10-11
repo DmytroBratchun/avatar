@@ -7,6 +7,7 @@ without re-encoding and the narration is muxed in.
 """
 
 import datetime as dt
+import functools
 import hashlib
 import json
 import re
@@ -15,10 +16,11 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import cv2
 from PIL import Image, ImageDraw, ImageFilter
 
 from app.config import CACHE_DIR, LIBRARY_DIR, data_path, media_stored, stored_path
-from app.editor import bgtrack, store
+from app.editor import bgtrack, maps, store
 from app.editor.store import Candidate, Project, Quote, RenderSettings
 
 WIDTH, HEIGHT = 1920, 1080
@@ -344,7 +346,7 @@ def needs_background(candidate: Candidate | None, settings: RenderSettings) -> b
     """Whether anything shows behind this clip - the scenery track, in a framed
     video. Not when the clip covers the screen: a comic page at full width, footage
     shown full screen; and a photo brings its own background."""
-    if candidate is None or settings.layout != "framed" or candidate.kind == "photo":
+    if candidate is None or settings.layout != "framed" or candidate.kind in ("photo", "map"):
         return False
     if candidate.kind == "comic" and candidate.image_path:
         width, height = _comic_size(candidate, settings)
@@ -842,6 +844,13 @@ def render_preview(project: Project, slot_index: int, fmt: str | None = None) ->
         raise RuntimeError("Find footage first - there is nothing to preview yet")
     chosen, duration, at = clips[slot_index % len(clips)]
     chosen = on_disk(chosen, store.project_dir(project.id))
+    if chosen.kind == "map" and chosen.map is not None:
+        cache_dir = store.project_dir(project.id) / "cache"
+        cache_dir.mkdir(exist_ok=True)
+        out = cache_dir / "preview.jpg"
+        picture = maps.still(chosen.map, max(1, round(duration * FPS)), 0.5)
+        cv2.imwrite(str(out), cv2.resize(picture, (1280, 720), interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 90])
+        return out
     from app.db.session import SessionLocal
 
     db = SessionLocal()
@@ -1059,9 +1068,12 @@ def render_project(project_id: str, report) -> None:
         nonlocal done
         path, args = job
         # encode to a temp name so an interrupted run can't leave a half-written file that looks cached
-        partial = path.with_suffix(".part.mp4")
-        _run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args, str(partial)])
-        partial.replace(path)
+        part = path.with_suffix(".part.mp4")
+        if callable(args):  # a shot drawn frame by frame (a map)
+            args(part)
+        else:
+            _run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", *args, str(part)])
+        part.replace(path)
         with lock:
             done += 1
             report(f"{stage_label} {done}/{total_jobs}")
@@ -1132,11 +1144,17 @@ def render_project(project_id: str, report) -> None:
         if candidate is not None and candidate.kind == "video" and candidate.source_id in stills:
             still = still_move(candidate, last_move)
         last_move = still
-        args, identity = _segment_args(
-            candidate, frames, project.settings, overlay, window,
-            track=track, track_frame=position, track_identity=bgtrack.slice_identity(placed, position, frames, speed),
-            mask=mask, upward=is_comic and comic_run % 2 == 1, still=still,
-        )
+        if candidate is not None and candidate.kind == "map" and candidate.map is not None:
+            # drawn by editor/maps.py rather than an ffmpeg filter graph
+            factor = _rate_factor(project.settings)
+            identity = maps.identity(candidate.map, frames, factor)
+            args = functools.partial(maps.render_clip, candidate.map, frames, factor)
+        else:
+            args, identity = _segment_args(
+                candidate, frames, project.settings, overlay, window,
+                track=track, track_frame=position, track_identity=bgtrack.slice_identity(placed, position, frames, speed),
+                mask=mask, upward=is_comic and comic_run % 2 == 1, still=still,
+            )
         comic_run = comic_run + 1 if is_comic else 0
         name = hashlib.sha1(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
         path = segments_dir / f"{name}.mp4"
