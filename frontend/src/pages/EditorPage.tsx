@@ -3,7 +3,7 @@ import { useState } from "react";
 import type { ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
-import type { EditorProject } from "../api/client";
+import type { EditorProjectSummary } from "../api/client";
 import VoiceTextTools from "../components/VoiceTextTools";
 
 function formatDuration(seconds: number | null): string {
@@ -15,11 +15,10 @@ function formatDuration(seconds: number | null): string {
 
 /** The project page's steps that every video goes through, done or not, and what
  * the video is doing now. */
-function ProjectProgress({ p }: { p: EditorProject }) {
-  const slots = p.beats.flatMap((b) => b.slots);
+function ProjectProgress({ p }: { p: EditorProjectSummary }) {
   const steps = [
     { label: "Narration", done: p.word_count > 0 },
-    { label: "Footage", done: slots.length > 0 && slots.every((s) => s.selected != null) },
+    { label: "Footage", done: p.footage_done },
     { label: "Video", done: !!p.rendered_at },
   ];
   const next = steps.find((s) => !s.done);
@@ -34,7 +33,7 @@ function ProjectProgress({ p }: { p: EditorProject }) {
         ) : p.job?.status === "error" ? (
           <span className="error-text">{p.job.stage} failed</span>
         ) : next ? (
-          next.label === "Narration" && !p.audio_file ? (p.script_text ? "to voice" : "no audio") : `next: ${next.label.toLowerCase()}`
+          next.label === "Narration" && !p.has_audio ? (p.has_script ? "to voice" : "no audio") : `next: ${next.label.toLowerCase()}`
         ) : (
           "rendered"
         )}

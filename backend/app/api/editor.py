@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from app.editor import jobs, music_library, store, voice_text, voiceover
-from app.editor.store import Project, Word
+from app.editor.store import Job, Project, Word
 from app.services.lumean import Lumean, LumeanError
 from app.services.runtime_settings import (
     current_lumean_api_key,
@@ -106,12 +106,37 @@ def write_settings(payload: EditorSettingsIn) -> EditorSettings:
     return EditorSettings(projects_root=str(path))
 
 
-@router.get("/projects", response_model=list[Project])
-def list_projects() -> list[Project]:
+class ProjectSummary(BaseModel):
+    """What the list of videos shows of a project - the whole of one runs to megabytes."""
+
+    id: str
+    title: str
+    created_at: str
+    audio_duration: float | None
+    has_audio: bool
+    has_script: bool
+    word_count: int
+    footage_done: bool
+    rendered_at: str | None
+    job: Job | None
+
+
+@router.get("/projects", response_model=list[ProjectSummary])
+def list_projects() -> list[ProjectSummary]:
     try:
-        return [jobs.reconcile(p) for p in store.list_projects()]
+        projects = [jobs.reconcile(p) for p in store.list_projects()]
     except store.RootNotConfigured:
         return []
+    summaries = []
+    for p in projects:
+        slots = [s for b in p.beats for s in b.slots]
+        summaries.append(ProjectSummary(
+            id=p.id, title=p.title, created_at=p.created_at, audio_duration=p.audio_duration,
+            has_audio=bool(p.audio_file), has_script=bool(p.script_text), word_count=p.word_count,
+            footage_done=bool(slots) and all(s.selected is not None for s in slots),
+            rendered_at=p.rendered_at, job=p.job,
+        ))
+    return summaries
 
 
 @router.post("/projects", response_model=Project)

@@ -66,8 +66,9 @@ settings = Settings()
 
 
 def _relative(path: str | Path, base: Path) -> str:
+    # no resolve(): it asks the disk, and a project serializes thousands of paths
     try:
-        return Path(path).resolve().relative_to(base.resolve()).as_posix()
+        return Path(os.path.abspath(path)).relative_to(base).as_posix()
     except ValueError:
         return str(path)
 

@@ -475,6 +475,20 @@ export interface EditorSound {
   files: string[];
 }
 
+// a row of the list of videos (GET /api/editor/projects)
+export interface EditorProjectSummary {
+  id: string;
+  title: string;
+  created_at: string;
+  audio_duration: number | null;
+  has_audio: boolean;
+  has_script: boolean;
+  word_count: number;
+  footage_done: boolean;
+  rendered_at: string | null;
+  job: EditorJob | null;
+}
+
 export interface EditorProject {
   version: number;
   id: string;
@@ -642,7 +656,7 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ projects_root }),
     }),
-  listEditorProjects: () => request<EditorProject[]>("/api/editor/projects"),
+  listEditorProjects: () => request<EditorProjectSummary[]>("/api/editor/projects"),
   getEditorProject: (id: string) => request<EditorProject>(`/api/editor/projects/${id}`),
   getEditorDefaultLook: () => request<EditorProject["settings"]>("/api/editor/default-look"),
   saveEditorDefaultLook: (id: string) =>
