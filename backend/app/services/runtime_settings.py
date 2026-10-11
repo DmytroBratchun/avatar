@@ -124,52 +124,11 @@ def caption_only_undescribed() -> bool:
     return (_read_raw().get("caption_scope") or "all") == "undescribed"
 
 
-def editor_default_look() -> dict:
-    """The look (frame, sizes, blur...) new video projects start with - whatever the
-    user last saved as default from a project's Look tab."""
-    value = _read_raw().get("editor_default_look")
-    return value if isinstance(value, dict) else {}
-
-
-def set_editor_default_look(look: dict) -> None:
-    with _lock:
-        raw = _read_raw()
-        raw["editor_default_look"] = look
-        SETTINGS_PATH.write_text(json.dumps(raw, indent=2), encoding="utf-8")
-
-
 def editor_music_library() -> str | None:
     """Folder of the music library - every composed track with its prompt, kept for
     later videos to reuse: <root>/library/music, unless settings.json names another
     ("music_library")."""
     return _read_raw().get("music_library") or str(LIBRARY_DIR / "music")
-
-
-def editor_default_visual_notes() -> str:
-    """The visual wishes ("more close-ups, fights over talk") new video projects start
-    with - whatever the user last saved as default."""
-    return (_read_raw().get("editor_default_visual_notes") or "").strip()
-
-
-def set_editor_default_visual_notes(text: str) -> None:
-    with _lock:
-        raw = _read_raw()
-        raw["editor_default_visual_notes"] = text
-        SETTINGS_PATH.write_text(json.dumps(raw, indent=2), encoding="utf-8")
-
-
-def editor_default_voice() -> dict:
-    """The voice and its settings new video projects start with - whatever the user
-    last saved as default from a project's Voice tab."""
-    value = _read_raw().get("editor_default_voice")
-    return value if isinstance(value, dict) else {}
-
-
-def set_editor_default_voice(voice: dict) -> None:
-    with _lock:
-        raw = _read_raw()
-        raw["editor_default_voice"] = voice
-        SETTINGS_PATH.write_text(json.dumps(raw, indent=2), encoding="utf-8")
 
 
 def current_caption_provider() -> str:

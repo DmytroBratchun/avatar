@@ -31,6 +31,11 @@ def _seconds(text: str) -> float:
     return int(minutes) * 60 + float(seconds or 0) if seconds else float(minutes)
 
 
+def _where(show, book, episode) -> str:
+    """"Show season 1 episode 2", or just the show for a film."""
+    return " ".join([str(show)] + ([f"season {book}"] if book is not None else []) + ([f"episode {episode}"] if episode is not None else []))
+
+
 def search(args) -> None:
     params = [("q", args.query), ("mode", args.mode), ("limit", str(args.limit))]
     if args.show:
@@ -47,7 +52,7 @@ def search(args) -> None:
         scene = result["scene"]
         about = (scene.get("context_description") or scene.get("wiki_description") or "(no description)").replace("\n", " ")
         print(
-            f"S{scene['id']} | {scene.get('show_title')} season {scene.get('book')} episode {scene.get('episode_number')} "
+            f"S{scene['id']} | {_where(scene.get('show_title'), scene.get('book'), scene.get('episode_number'))} "
             f"(episode id {scene['source_id']}) {_clock(scene['start_time'])}-{_clock(scene['end_time'])} | {about[:260]}"
         )
 
@@ -64,7 +69,7 @@ def episode(args) -> None:
         return
     start = _seconds(args.start) if args.start else 0.0
     end = _seconds(args.end) if args.end else float("inf")
-    print(episode_text(db, source, f"{source.show_title} season {source.book} episode {source.episode_number}", start, end)[0])
+    print(episode_text(db, source, _where(source.show_title, source.book, source.episode_number), start, end)[0])
 
 
 def scene(args) -> None:
@@ -80,7 +85,7 @@ def scene(args) -> None:
         return
     source = db.get(Source, found.source_id)
     print(
-        f"S{found.id} | {source.show_title} season {source.book} episode {source.episode_number} (episode id {source.id}) "
+        f"S{found.id} | {_where(source.show_title, source.book, source.episode_number)} (episode id {source.id}) "
         f"{_clock(found.start_time)}-{_clock(found.end_time)}"
     )
     if found.context_description:

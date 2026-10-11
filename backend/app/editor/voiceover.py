@@ -26,9 +26,8 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from app.editor import store
+from app.editor import presets, store
 from app.services.lumean import Lumean, LumeanError
-from app.services.runtime_settings import editor_default_voice
 
 STATE_FILE = "voiceover.json"
 FOLDER = "voiceover"
@@ -87,10 +86,10 @@ class Voiceover(BaseModel):
     updated_at: str = ""
 
 
-def default_voice() -> VoiceSettings:
-    """The voice a project starts with: the saved default, if there is one."""
+def preset_voice(preset_id: str) -> VoiceSettings:
+    """The voice a project starts with: its preset's, if the preset has one."""
     try:
-        return VoiceSettings.model_validate(editor_default_voice())
+        return VoiceSettings.model_validate(presets.get(preset_id).voice)
     except ValueError:
         return VoiceSettings()
 
@@ -98,7 +97,7 @@ def default_voice() -> VoiceSettings:
 def load(project_id: str) -> Voiceover:
     path = store.project_dir(project_id) / STATE_FILE
     if not path.is_file():
-        return Voiceover(settings=default_voice())
+        return Voiceover(settings=preset_voice(store.load_project(project_id).preset))
     return Voiceover.model_validate_json(path.read_text(encoding="utf-8"))
 
 

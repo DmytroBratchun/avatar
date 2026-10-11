@@ -372,6 +372,22 @@ export interface EditorMusicBlock {
 
 // --- voice-over (the script voiced through Lumean) ---
 
+// what a new video starts with (backend editor/presets.py); "default" always exists
+export interface EditorPreset {
+  id: string;
+  name: string;
+  universe: string; // "" = chosen for each video
+  shows: string[]; // [] = all of the universe's shows
+  look: Partial<EditorProject["settings"]>;
+  voice: Partial<VoiceSettings>;
+  visual_notes: string;
+  footage_notes: string;
+  voice_instructions: string;
+  run_all: boolean;
+}
+
+export type EditorPresetPatch = Partial<Pick<EditorPreset, "name" | "universe" | "shows" | "visual_notes" | "footage_notes" | "voice_instructions" | "run_all">>;
+
 export interface VoiceSettings {
   voice_id: string;
   voice_name: string;
@@ -503,6 +519,7 @@ export interface EditorProject {
   visual_notes?: string | null;
   unlock_before?: string[];
   shows: string[];
+  preset: string;
   settings: {
     layout: "framed" | "simple";
     search_mode: "smart_hybrid" | "text" | "visual";
@@ -660,9 +677,13 @@ export const api = {
   getEditorProject: (id: string) => request<EditorProject>(`/api/editor/projects/${id}`),
   // deletes the project folder; `left` lists files that could not be removed (open elsewhere)
   deleteEditorProject: (id: string) => request<{ left: string[] }>(`/api/editor/projects/${id}`, { method: "DELETE" }),
-  getEditorDefaultLook: () => request<EditorProject["settings"]>("/api/editor/default-look"),
-  saveEditorDefaultLook: (id: string) =>
-    request<EditorProject["settings"]>(`/api/editor/projects/${id}/save-default-look`, { method: "POST" }),
+  saveLookToPreset: (id: string) => request<EditorPreset>(`/api/editor/projects/${id}/save-look-to-preset`, { method: "POST" }),
+  listPresets: () => request<EditorPreset[]>("/api/editor/presets"),
+  createPreset: (name: string, copy_from: string) =>
+    request<EditorPreset>("/api/editor/presets", { method: "POST", body: JSON.stringify({ name, copy_from }) }),
+  updatePreset: (id: string, patch: EditorPresetPatch) =>
+    request<EditorPreset>(`/api/editor/presets/${id}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deletePreset: (id: string) => request<{ ok: boolean }>(`/api/editor/presets/${id}`, { method: "DELETE" }),
   listUniverses: () => request<UniverseOut[]>("/api/universes"),
   listBankQuotes: (params: { q?: string; speaker?: string; shows?: string[] }) => {
     const search = new URLSearchParams();
@@ -679,17 +700,17 @@ export const api = {
     visual_notes?: string;
     shows: string[];
     layout?: string;
+    preset: string;
   }) => request<EditorProject>("/api/editor/projects", { method: "POST", body: JSON.stringify(payload) }),
   // one Claude call: the script with directions to the voice, pauses and numbers spelled out
   prepareVoiceText: (text: string, instructions: string) =>
     request<VoiceText>("/api/editor/voice-text", { method: "POST", body: JSON.stringify({ text, instructions }) }),
-  getDefaultVoice: () => request<VoiceSettings>("/api/editor/voiceover/default-voice"),
-  saveDefaultVoice: (id: string) =>
-    request<VoiceSettings>(`/api/editor/projects/${id}/voiceover/save-default-voice`, { method: "POST" }),
+  saveVoiceToPreset: (id: string) => request<EditorPreset>(`/api/editor/projects/${id}/voiceover/save-to-preset`, { method: "POST" }),
   updateEditorProject: (
     id: string,
     payload: {
       title?: string;
+      preset?: string;
       script_text?: string;
       footage_notes?: string;
       visual_notes?: string;
@@ -728,9 +749,6 @@ export const api = {
   // unlock: re-pick the clips the user locked too (shot queries, find footage)
   runEditorStage: (id: string, stage: EditorStage, unlock = false) =>
     request<EditorProject>(`/api/editor/projects/${id}/run/${stage}${unlock ? "?unlock=true" : ""}`, { method: "POST" }),
-  getDefaultVisualNotes: () => request<{ text: string }>("/api/editor/default-visual-notes"),
-  saveDefaultVisualNotes: (text: string) =>
-    request<{ text: string }>("/api/editor/default-visual-notes", { method: "PUT", body: JSON.stringify({ text }) }),
   // queues every stage still to do, through the render; music only when asked (paid)
   runEditorAll: (id: string, music = false) =>
     request<EditorProject>(`/api/editor/projects/${id}/run-all${music ? "?music=true" : ""}`, { method: "POST" }),

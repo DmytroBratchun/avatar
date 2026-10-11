@@ -129,18 +129,22 @@ def tokens(text: str) -> list[str]:
 
 class Wiki:
     """All of a wiki's episode transcripts, parsed, with what is needed to find the
-    page of an episode from its words."""
+    page of an episode from its words. Screenplays (services/screenplays.py) can be
+    given as more pages, with or without a wiki; their descriptions are placed
+    strictly (see align)."""
 
-    def __init__(self, base: str, report=None):
+    def __init__(self, base: str | None, report=None, screenplays: dict[str, list[Entry]] | None = None):
         self.base = base
         self.pages: dict[str, list[Entry]] = {}
-        titles = transcript_pages(base)
+        titles = transcript_pages(base) if base else []
         for n, title in enumerate(titles):
             entries = parse_page(page_wikitext(base, title))
             if sum(1 for e in entries if e.kind == "line") >= MIN_LINES_PER_PAGE:
                 self.pages[title] = entries
             if report and (n + 1) % 50 == 0:
                 report(f"reading wiki pages {n + 1}/{len(titles)}")
+        self.screenplays = set(screenplays or {})
+        self.pages.update(screenplays or {})
         self._words = {
             title: collections.Counter(w for e in entries if e.kind == "line" for w in tokens(e.text))
             for title, entries in self.pages.items()
@@ -161,7 +165,8 @@ class Wiki:
             dot = sum(self._idf.get(w, 0) ** 2 * n * page_words[w] for w, n in words.items() if w in page_words)
             scores.append((dot / (norm * self._norms[title]), title))
         scores.sort(reverse=True)
-        return scores[0][1], scores[0][0] / max(scores[1][0], 1e-9)
+        runner_up = scores[1][0] if len(scores) > 1 else 0.0
+        return scores[0][1], scores[0][0] / max(runner_up, 1e-9)
 
     def align(self, lines: list[tuple[float, float, str]]) -> Alignment | None:
         """Aligns an episode's Whisper lines [(start, end, text)] with its wiki page."""
@@ -204,10 +209,20 @@ class Wiki:
             if times and len(times) / count >= LINE_MATCH_SHARE:
                 entries[entry_index].start, entries[entry_index].end = round(min(times), 2), round(max(times), 2)
 
-        # descriptions: the gap between the placed lines before and after
+        # descriptions: the gap between the placed lines before and after. A screenplay
+        # is a draft - whole scenes of it never made the film - so there a description
+        # is placed only when a line next to it (the nearest before or after) was found
+        strict = page in self.screenplays
         for i, entry in enumerate(entries):
             if entry.kind != "desc":
                 continue
+            if strict:
+                near = [
+                    next((entries[j] for j in range(i - 1, -1, -1) if entries[j].kind == "line"), None),
+                    next((entries[j] for j in range(i + 1, len(entries)) if entries[j].kind == "line"), None),
+                ]
+                if not any(line is not None and line.start is not None for line in near):
+                    continue
             before = next((entries[j].end for j in range(i - 1, -1, -1) if entries[j].kind == "line" and entries[j].end is not None), 0.0)
             after = next((entries[j].start for j in range(i + 1, len(entries)) if entries[j].kind == "line" and entries[j].start is not None), None)
             if after is not None and after >= before:

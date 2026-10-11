@@ -9,12 +9,15 @@ export default function VoiceTextTools({
   text,
   disabled,
   onChange,
+  instructions: initialInstructions = "",
 }: {
   text: string;
   disabled?: boolean;
   onChange: (text: string) => void;
+  // what the field starts with: the preset's "how it should sound"
+  instructions?: string;
 }) {
-  const [instructions, setInstructions] = useState("");
+  const [instructions, setInstructions] = useState(initialInstructions);
   // the script as it was before it was prepared, while the prepared one is still in the field
   const [before, setBefore] = useState<{ original: string; prepared: string } | null>(null);
 

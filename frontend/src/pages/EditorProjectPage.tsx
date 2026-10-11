@@ -296,7 +296,7 @@ function BeatRow({
   );
 }
 
-const TABS = ["pipeline", "voice", "quotes", "clips", "music", "look", "video"] as const;
+const TABS = ["pipeline", "voice", "music", "look", "quotes", "clips", "video"] as const;
 type Tab = (typeof TABS)[number];
 
 export default function EditorProjectPage() {
@@ -501,10 +501,10 @@ export default function EditorProjectPage() {
   const tabs: { key: Tab; label: string }[] = [
     { key: "pipeline", label: "Pipeline" },
     { key: "voice", label: "Voice" },
-    { key: "quotes", label: project.quotes.length > 0 ? `Quotes ${approvedQuotes}/${project.quotes.length}` : "Quotes" },
-    { key: "clips", label: slots.length > 0 ? `Clips ${slotsFilled}/${slots.length}` : "Clips" },
     { key: "music", label: "Music" },
     { key: "look", label: "Look" },
+    { key: "quotes", label: project.quotes.length > 0 ? `Quotes ${approvedQuotes}/${project.quotes.length}` : "Quotes" },
+    { key: "clips", label: slots.length > 0 ? `Clips ${slotsFilled}/${slots.length}` : "Clips" },
     { key: "video", label: "Video" },
   ];
   const renderButton = (

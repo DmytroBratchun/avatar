@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import PresetsPane from "./PresetsPane";
 
 const MODELS = [
   { value: "sonnet", label: "Sonnet — recommended" },
@@ -57,6 +58,7 @@ function TaskModel({ label, description, value, defaultModel, onChange }: {
 const SECTIONS = [
   { id: "models", label: "Models" },
   { id: "captioning", label: "Captioning" },
+  { id: "presets", label: "Presets" },
   { id: "keys", label: "API keys" },
   { id: "usage", label: "Usage" },
 ] as const;
@@ -277,10 +279,11 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                   </p>
 
                   <p className="hint" style={{ margin: "0.75rem 0 0" }}>
-                    Keys are kept in <code>backend/data/settings.json</code>.
+                    Keys are kept in <code>index/settings.json</code>.
                   </p>
                   </>
                 )}
+                {section === "presets" && <PresetsPane />}
                 {section === "usage" && (
                   <>
                     <p className="hint" style={{ marginTop: 0 }}>Where the money and quota go.</p>
@@ -300,7 +303,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
               </div>
             </div>
 
-            <div className="settings-footer">
+            <div className="settings-footer" style={section === "presets" ? { display: "none" } : undefined}>
               <button className="primary" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
                 {saveMutation.isPending ? "Saving…" : "Save"}
               </button>

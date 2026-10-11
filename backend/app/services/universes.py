@@ -49,6 +49,9 @@ class Universe(BaseModel):
     # MediaWiki API of a fan wiki with a "Transcript" namespace: episode transcripts
     # with speaker names and descriptions (see services/wiki_transcripts.py)
     transcripts_wiki: str | None = None
+    # screenplays of its films or episodes, as text files relative to media/ - the same
+    # kind of knowledge where the wiki has no transcripts (see services/screenplays.py)
+    screenplays: list[str] = Field(default_factory=list)
     # curated quote collections: a Wikiquote api.php and the pages to read from it
     quotes_wiki: str | None = None
     quote_pages: list[str] = []

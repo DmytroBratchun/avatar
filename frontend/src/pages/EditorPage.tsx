@@ -173,32 +173,37 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
   const [tab, setTab] = useState<NewVideoTab>("basics");
   const { data: universes } = useQuery({ queryKey: ["universes"], queryFn: api.listUniverses });
-  const [universeId, setUniverseId] = useState<string | null>(null);
-  // the first universe until the user picks another
-  const universe = universes?.find((u) => u.id === universeId) ?? universes?.[0];
+  const { data: presets } = useQuery({ queryKey: ["editorPresets"], queryFn: api.listPresets });
+  const [presetId, setPresetId] = useState("default");
+  const preset = presets?.find((p) => p.id === presetId) ?? presets?.[0];
+  // What the user changed here; every other field follows the preset, and picking
+  // another preset puts them all back to following it.
+  const [edited, setEdited] = useState<{
+    universe?: string;
+    shows?: string[];
+    layout?: string;
+    visual?: string;
+    notes?: string;
+    runAll?: boolean;
+  }>({});
+  const edit = (patch: typeof edited) => setEdited((current) => ({ ...current, ...patch }));
+  // the preset's universe, else the first one, until the user picks another
+  const universe = universes?.find((u) => u.id === (edited.universe ?? preset?.universe)) ?? universes?.[0];
+  const shows = edited.shows ?? (universe?.id === preset?.universe ? (preset?.shows ?? []) : []);
+  const layout = edited.layout ?? preset?.look.layout ?? "framed";
+  const visual = edited.visual ?? preset?.visual_notes ?? "";
+  const notes = edited.notes ?? preset?.footage_notes ?? "";
+  const runAll = edited.runAll ?? preset?.run_all ?? true;
+  const presetVoice = preset?.voice;
 
   const [title, setTitle] = useState("");
   // where the narration comes from: an audio file, or the script voiced here
   const [narration, setNarration] = useState<"audio" | "script">("audio");
   const [audio, setAudio] = useState<File | null>(null);
   const [scriptText, setScriptText] = useState("");
-  const [shows, setShows] = useState<string[]>([]);
-  const [notes, setNotes] = useState("");
-  const { data: defaultVisual } = useQuery({ queryKey: ["editorDefaultVisualNotes"], queryFn: api.getDefaultVisualNotes });
-  // null until edited: the saved default until then
-  const [editedVisual, setVisual] = useState<string | null>(null);
-  const visual = editedVisual ?? defaultVisual?.text ?? "";
-  const [rememberVisual, setRememberVisual] = useState(false);
-  const [runAll, setRunAll] = useState(true);
-  const { data: defaultLook } = useQuery({ queryKey: ["editorDefaultLook"], queryFn: api.getEditorDefaultLook });
-  const { data: defaultVoice } = useQuery({ queryKey: ["editorDefaultVoice"], queryFn: api.getDefaultVoice });
-  // null until the user picks one; then the saved default look decides
-  const [chosenLayout, setLayout] = useState<string | null>(null);
-  const layout = chosenLayout ?? defaultLook?.layout ?? "framed";
 
   const createMutation = useMutation({
     mutationFn: async () => {
-      if (rememberVisual) await api.saveDefaultVisualNotes(visual);
       const project = await api.createEditorProject({
         title,
         universe: universe?.id ?? "",
@@ -207,6 +212,7 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
         visual_notes: visual.trim() || undefined,
         shows,
         layout,
+        preset: preset?.id ?? "default",
       });
       if (narration === "audio" && audio) {
         await api.uploadEditorAudio(project.id, audio);
@@ -216,7 +222,6 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
     },
     onSuccess: (project) => {
       queryClient.invalidateQueries({ queryKey: ["editorProjects"] });
-      queryClient.invalidateQueries({ queryKey: ["editorDefaultVisualNotes"] });
       // a project made from a script is voiced next
       navigate(narration === "script" ? `/editor/${project.id}?tab=voice` : `/editor/${project.id}`);
     },
@@ -244,7 +249,7 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
   );
 
   function toggleShow(show: string) {
-    setShows((current) => (current.includes(show) ? current.filter((s) => s !== show) : [...current, show]));
+    edit({ shows: shows.includes(show) ? shows.filter((s) => s !== show) : [...shows, show] });
   }
 
   // a dot on a tab that has something filled in, so nothing set there goes unseen
@@ -288,16 +293,29 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
           <div className="settings-pane">
             {tab === "basics" && (
               <>
+                <FormRow label="Preset" hint="Fills in everything below - change any of it for this video.">
+                  <select
+                    value={preset?.id ?? "default"}
+                    onChange={(e) => {
+                      setPresetId(e.target.value);
+                      setEdited({});
+                    }}
+                  >
+                    {(presets ?? []).map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </FormRow>
                 <FormRow label="Title">
                   <input autoFocus value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Why airbending is underrated" />
                 </FormRow>
                 <FormRow label="Universe">
                   <select
                     value={universe?.id ?? ""}
-                    onChange={(e) => {
-                      setUniverseId(e.target.value);
-                      setShows([]); // shows of one universe make no sense in another
-                    }}
+                    // shows of one universe make no sense in another
+                    onChange={(e) => edit({ universe: e.target.value, shows: [] })}
                   >
                     {(universes ?? []).map((u) => (
                       <option key={u.id} value={u.id}>
@@ -317,7 +335,7 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
                   </div>
                 </FormRow>
                 <FormRow label="Layout">
-                  <select value={layout} onChange={(e) => setLayout(e.target.value)}>
+                  <select value={layout} onChange={(e) => edit({ layout: e.target.value })}>
                     <option value="framed">Framed - clip in a frame over a blurred background</option>
                     <option value="simple">Simple - clip fills the screen</option>
                   </select>
@@ -352,11 +370,11 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
                   <>
                     <FormRow label="Script" hint="Read as written; anything in square brackets is a direction to the voice and is not spoken.">
                       {scriptField(12)}
-                      <VoiceTextTools text={scriptText} disabled={busy} onChange={setScriptText} />
+                      <VoiceTextTools key={preset?.id} text={scriptText} disabled={busy} onChange={setScriptText} instructions={preset?.voice_instructions} />
                     </FormRow>
                     <p className="hint">
-                      {defaultVoice?.voice_id
-                        ? `Voice: ${defaultVoice.voice_name || defaultVoice.voice_id} (the default) - it can be changed before anything is ordered.`
+                      {presetVoice?.voice_id
+                        ? `Voice: ${presetVoice.voice_name || presetVoice.voice_id} (from the preset) - it can be changed before anything is ordered.`
                         : "The voice is chosen on the next page; nothing is ordered until you ask."}
                     </p>
                   </>
@@ -371,22 +389,18 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
                     rows={6}
                     value={visual}
                     disabled={busy}
-                    onChange={(e) => setVisual(e.target.value)}
+                    onChange={(e) => edit({ visual: e.target.value })}
                     placeholder="More close-ups of faces. Fights over people talking. Avoid the comics unless the script is about them."
                     style={{ width: "100%" }}
                   />
-                  <label className="form-inline-check">
-                    <input type="checkbox" checked={rememberVisual} onChange={(e) => setRememberVisual(e.target.checked)} />
-                    Use for new videos too
-                  </label>
                 </FormRow>
                 <FormRow label="Material from" hint={'Where the script\'s story comes from - e.g. "Keung and June are from the comic The Bounty Hunter and the Tea Brewer".'}>
-                  <textarea rows={4} value={notes} disabled={busy} onChange={(e) => setNotes(e.target.value)} placeholder="Optional" style={{ width: "100%" }} />
+                  <textarea rows={4} value={notes} disabled={busy} onChange={(e) => edit({ notes: e.target.value })} placeholder="Optional" style={{ width: "100%" }} />
                 </FormRow>
                 {narration === "audio" && (
                   <FormRow label="After creating">
                     <label className="form-inline-check" style={{ marginTop: 0 }}>
-                      <input type="checkbox" checked={runAll} onChange={(e) => setRunAll(e.target.checked)} />
+                      <input type="checkbox" checked={runAll} onChange={(e) => edit({ runAll: e.target.checked })} />
                       Run to the end: transcribe, find footage, render (free; quotes and music are left to you)
                     </label>
                   </FormRow>

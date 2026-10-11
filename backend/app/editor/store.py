@@ -22,7 +22,8 @@ from pathlib import Path
 from pydantic import BaseModel, Field, field_serializer, model_validator
 
 from app.config import media_path, media_stored
-from app.services.runtime_settings import editor_default_look, editor_projects_root
+from app.editor import presets
+from app.services.runtime_settings import editor_projects_root
 from app.services.universes import Universe, all_universes, get_universe, universe_for_show
 
 SCHEMA_VERSION = 1
@@ -328,6 +329,8 @@ class Project(BaseModel):
     # what the prompts say about the world. Empty on projects made before universes.
     universe: str = ""
     shows: list[str] = Field(default_factory=list)
+    # the preset it was made from (editor/presets.py): its "save to preset" buttons write there
+    preset: str = ""
     settings: RenderSettings = Field(default_factory=RenderSettings)
     word_count: int = 0
     timeline: list[Segment] = Field(default_factory=list)
@@ -388,11 +391,11 @@ def _slugify(title: str) -> str:
     return slug or "project"
 
 
-def default_settings(layout: str | None = None) -> RenderSettings:
-    """Settings for a new project: the saved default look, falling back to the
-    built-in defaults for anything missing or no longer valid."""
+def default_settings(layout: str | None = None, preset_id: str = presets.DEFAULT_ID) -> RenderSettings:
+    """Settings for a new project: the preset's look, falling back to the built-in
+    defaults for anything missing or no longer valid."""
     try:
-        settings = RenderSettings.model_validate(editor_default_look())
+        settings = RenderSettings.model_validate(presets.get(preset_id).look)
     except ValueError:
         settings = RenderSettings()
     if layout:
@@ -425,6 +428,7 @@ def create_project(
     title: str, script_text: str | None, shows: list[str], layout: str | None, universe: str = "",
     footage_notes: str | None = None,
     visual_notes: str | None = None,
+    preset: str = presets.DEFAULT_ID,
 ) -> Project:
     with _lock:
         root = root_dir()
@@ -447,7 +451,8 @@ def create_project(
             visual_notes=(visual_notes or "").strip() or None,
             universe=universe,
             shows=shows,
-            settings=default_settings(layout),
+            preset=presets.get(preset).id,
+            settings=default_settings(layout, preset),
         )
         _write_json(root / project_id / PROJECT_FILE, project.model_dump())
         return project

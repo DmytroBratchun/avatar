@@ -440,7 +440,11 @@ def _review(project: Project, words: list[Word], ends: list[int], universe, cwd:
         at = min(bisect.bisect_left(ends, quote.after_word), len(ends) - 1)
         low, high = max(0, at - REVIEW_BEFORE + 1), min(len(ends) - 1, at + REVIEW_AFTER)
         windows.append((low, high))
-        where = f"{quote.show_title}, {universe.season_word} {quote.book}, Episode {quote.episode_number}"
+        where = ", ".join(
+            [quote.show_title]
+            + ([f"{universe.season_word} {quote.book}"] if quote.book is not None else [])
+            + ([f"Episode {quote.episode_number}"] if quote.episode_number is not None else [])
+        )
         lines = []
         for i in range(low, high + 1):
             lines.append(f"[{i}] {sentences[i]}")

@@ -6,16 +6,12 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
-from app.editor import jobs, music_library, store, voice_text, voiceover
+from app.editor import jobs, music_library, presets, store, voice_text, voiceover
 from app.editor.store import Job, Project, Word
 from app.services.lumean import Lumean, LumeanError
 from app.services.runtime_settings import (
     current_lumean_api_key,
     editor_projects_root,
-    set_editor_default_look,
-    set_editor_default_voice,
-    editor_default_visual_notes,
-    set_editor_default_visual_notes,
     set_editor_projects_root,
 )
 
@@ -41,7 +37,8 @@ class ProjectCreateIn(BaseModel):
     visual_notes: str | None = None
     universe: str = ""
     shows: list[str] = []
-    layout: str | None = None  # None = the saved default look's layout
+    layout: str | None = None  # None = the preset look's layout
+    preset: str = presets.DEFAULT_ID
 
 
 class VoiceTextIn(BaseModel):
@@ -51,6 +48,7 @@ class VoiceTextIn(BaseModel):
 
 class ProjectUpdateIn(BaseModel):
     title: str | None = None
+    preset: str | None = None  # which preset its "save to preset" buttons write to
     script_text: str | None = None
     footage_notes: str | None = None
     visual_notes: str | None = None
@@ -149,7 +147,7 @@ def create_project(payload: ProjectCreateIn) -> Project:
     try:
         return store.create_project(
             title, payload.script_text, payload.shows, payload.layout, payload.universe, payload.footage_notes,
-            payload.visual_notes,
+            payload.visual_notes, payload.preset,
         )
     except store.RootNotConfigured:
         raise HTTPException(409, "Editor projects folder is not set")
@@ -192,6 +190,8 @@ def update_project(project_id: str, payload: ProjectUpdateIn) -> Project:
             p.visual_notes = (data["visual_notes"] or "").strip() or None
         if data.get("shows") is not None:
             p.shows = data["shows"]
+        if data.get("preset"):
+            p.preset = presets.get(data["preset"]).id
         if data.get("layout"):
             p.settings.layout = data["layout"]
         if data.get("search_mode"):
@@ -470,38 +470,15 @@ def prepare_voice_text(payload: VoiceTextIn) -> dict:
     return {"text": text, "changes": changes, "cost_usd": cost}
 
 
-class VisualNotesIn(BaseModel):
-    text: str
-
-
-@router.get("/default-visual-notes")
-def get_default_visual_notes() -> dict:
-    """The visual wishes a new video starts with - the ones last saved as default."""
-    return {"text": editor_default_visual_notes()}
-
-
-@router.put("/default-visual-notes")
-def save_default_visual_notes(payload: VisualNotesIn) -> dict:
-    set_editor_default_visual_notes(payload.text.strip())
-    return {"text": editor_default_visual_notes()}
-
-
-@router.get("/voiceover/default-voice", response_model=voiceover.VoiceSettings)
-def get_default_voice() -> voiceover.VoiceSettings:
-    """The voice new projects start with (no voice_id when none was saved)."""
-    return voiceover.default_voice()
-
-
-@router.post("/projects/{project_id}/voiceover/save-default-voice", response_model=voiceover.VoiceSettings)
-def save_default_voice(project_id: str) -> voiceover.VoiceSettings:
-    """Makes this project's voice and its settings the starting point for new
-    projects. Existing projects are not changed."""
-    _load(project_id)
+@router.post("/projects/{project_id}/voiceover/save-to-preset", response_model=presets.Preset)
+def save_voice_to_preset(project_id: str) -> presets.Preset:
+    """Makes this project's voice and its settings the voice of its preset - what new
+    videos made from it start with. Existing projects are not changed."""
+    project = _load(project_id)
     settings = voiceover.load(project_id).settings
     if not settings.voice_id:
         raise HTTPException(400, "Choose a voice first")
-    set_editor_default_voice(settings.model_dump())
-    return voiceover.default_voice()
+    return presets.update(presets.get(project.preset).id, {"voice": settings.model_dump()})
 
 
 @router.get("/voiceover/own-voices")
@@ -1184,16 +1161,64 @@ def get_preview_info(project_id: str) -> dict:
     return info
 
 
-@router.get("/default-look")
-def get_default_look() -> dict:
-    """The look new projects start with."""
-    return store.default_settings().model_dump()
-
-
-@router.post("/projects/{project_id}/save-default-look")
-def save_default_look(project_id: str) -> dict:
-    """Makes this project's look (everything on its Look tab) the starting point for
-    new projects. Existing projects are not changed."""
+@router.post("/projects/{project_id}/save-look-to-preset", response_model=presets.Preset)
+def save_look_to_preset(project_id: str) -> presets.Preset:
+    """Makes this project's look (everything on its Look tab) the look of its preset -
+    what new videos made from it start with. Existing projects are not changed."""
     project = _load(project_id)
-    set_editor_default_look(project.settings.model_dump())
-    return store.default_settings().model_dump()
+    return presets.update(presets.get(project.preset).id, {"look": project.settings.model_dump()})
+
+
+# --- presets ---------------------------------------------------------------------
+
+
+class PresetCreateIn(BaseModel):
+    name: str
+    copy_from: str = presets.DEFAULT_ID
+
+
+class PresetUpdateIn(BaseModel):
+    name: str | None = None
+    universe: str | None = None
+    shows: list[str] | None = None
+    visual_notes: str | None = None
+    footage_notes: str | None = None
+    voice_instructions: str | None = None
+    run_all: bool | None = None
+
+
+@router.get("/presets", response_model=list[presets.Preset])
+def list_presets() -> list[presets.Preset]:
+    return presets.all_presets()
+
+
+@router.post("/presets", response_model=presets.Preset)
+def create_preset(payload: PresetCreateIn) -> presets.Preset:
+    """A new preset, starting as a copy of another (the default one unless named)."""
+    if not payload.name.strip():
+        raise HTTPException(400, "Name is required")
+    return presets.create(payload.name.strip(), payload.copy_from)
+
+
+@router.patch("/presets/{preset_id}", response_model=presets.Preset)
+def update_preset(preset_id: str, payload: PresetUpdateIn) -> presets.Preset:
+    changes = payload.model_dump(exclude_none=True)
+    if "name" in changes and not changes["name"].strip():
+        raise HTTPException(400, "Name is required")
+    if "universe" in changes and changes["universe"] != presets.get(preset_id).universe and "shows" not in changes:
+        changes["shows"] = []  # shows of one universe make no sense in another
+    try:
+        return presets.update(preset_id, changes)
+    except KeyError:
+        raise HTTPException(404, "Preset not found")
+
+
+@router.delete("/presets/{preset_id}")
+def delete_preset(preset_id: str) -> dict:
+    """Deletes a preset. Videos made from it keep their settings; their "save to
+    preset" buttons then write to the default preset."""
+    try:
+        presets.delete(preset_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return {"ok": True}

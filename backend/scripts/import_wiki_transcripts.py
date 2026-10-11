@@ -1,5 +1,6 @@
-"""Imports fan-wiki episode transcripts (see app/services/wiki_transcripts.py) for
-every show whose universe names a transcripts wiki:
+"""Imports fan-wiki episode transcripts (see app/services/wiki_transcripts.py) and
+screenplays (app/services/screenplays.py) for every show whose universe names a
+transcripts wiki or screenplays:
 
 - sets the speaker of each transcript line;
 - removes lines Whisper invented over music and silence - runs of three or more
@@ -10,11 +11,12 @@ every show whose universe names a transcripts wiki:
   the time range each was matched to, in the wiki_entries table.
 
 Scene captions and embeddings are not touched. An episode whose page matches poorly
-is skipped. Removed lines are also written to a JSON file next to the database.
+is skipped. A screenplay is a draft, so nothing is removed on its account. Removed lines are also written to a JSON file next to the database.
 
 Usage (from backend/, with the backend stopped):
     .venv/Scripts/python scripts/import_wiki_transcripts.py           # preview only
     .venv/Scripts/python scripts/import_wiki_transcripts.py --apply    # write changes
+    .venv/Scripts/python scripts/import_wiki_transcripts.py --universe lotr   # one universe
 """
 
 import argparse
@@ -31,10 +33,13 @@ from sqlalchemy import delete, select
 from app.config import BACKUPS_DIR
 from app.db.models import Scene, Source, TranscriptLine, WikiEntry
 from app.db.session import SessionLocal, init_db
+from app.services import screenplays
 from app.services.universes import all_universes
 from app.services.wiki_transcripts import Wiki, tokens
 
 MIN_PAGE_MATCH = 0.75  # share of the wiki page's words that must be found in our transcript
+# a screenplay's dialogue was rewritten and cut on the way to the film
+MIN_SCREENPLAY_MATCH = 0.4
 MIN_INVENTED_RUN = 3
 KNOWN_LINE_TOKENS = 4  # shorter lines ("No!", "Earth.") occur everywhere and prove nothing
 
@@ -64,6 +69,7 @@ def invented_lines(lines: list[TranscriptLine], found: list[float], said_anywher
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true", help="Write changes (default: dry-run preview)")
+    parser.add_argument("--universe", help="Only this universe (its id)")
     args = parser.parse_args()
 
     init_db()  # creates wiki_entries and the new columns if this is the first run
@@ -72,10 +78,14 @@ def main() -> None:
     removed_log = []
     try:
         for universe in all_universes():
-            if not universe.transcripts_wiki:
+            if (args.universe and universe.id != args.universe) or (not universe.transcripts_wiki and not universe.screenplays):
                 continue
-            print(f"Universe {universe.name}: reading {universe.transcripts_wiki}", flush=True)
-            wiki = Wiki(universe.transcripts_wiki, report=lambda message: print("  " + message, flush=True))
+            print(f"Universe {universe.name}: reading {universe.transcripts_wiki or ''} {', '.join(universe.screenplays)}", flush=True)
+            wiki = Wiki(
+                universe.transcripts_wiki,
+                report=lambda message: print("  " + message, flush=True),
+                screenplays=screenplays.load(universe.screenplays),
+            )
             said_anywhere = " | ".join(
                 " ".join(tokens(e.text)) for entries in wiki.pages.values() for e in entries if e.kind == "line"
             )
@@ -92,12 +102,13 @@ def main() -> None:
                 if not lines:
                     continue
                 alignment = wiki.align([(line.start_time, line.end_time, line.text) for line in lines])
-                if alignment is None or alignment.wiki_words_found < MIN_PAGE_MATCH:
+                screenplay = alignment is not None and alignment.page in wiki.screenplays
+                if alignment is None or alignment.wiki_words_found < (MIN_SCREENPLAY_MATCH if screenplay else MIN_PAGE_MATCH):
                     totals["episodes skipped"] += 1
                     print(f"  SKIP {label}: no transcript page matches (best: {alignment.page if alignment else '-'})")
                     continue
 
-                drop = invented_lines(lines, alignment.found, said_anywhere)
+                drop = [] if screenplay else invented_lines(lines, alignment.found, said_anywhere)
                 dropped_ids = {line.id for line in drop}
                 with_speaker = sum(1 for line, speaker in zip(lines, alignment.speakers) if speaker and line.id not in dropped_ids)
                 descriptions = [e for e in alignment.entries if e.kind == "desc"]
@@ -109,7 +120,7 @@ def main() -> None:
                 totals["descriptions stored"] += len(descriptions)
                 totals["descriptions with a time range"] += sum(1 for e in descriptions if e.start is not None)
                 print(
-                    f"  {label}: {alignment.page[11:]} | page words found {alignment.wiki_words_found:.0%} | "
+                    f"  {label}: {alignment.page.removeprefix('Transcript:')} | page words found {alignment.wiki_words_found:.0%} | "
                     f"speaker on {with_speaker}/{len(lines) - len(drop)} | remove {len(drop)} | descriptions {len(descriptions)}",
                     flush=True,
                 )

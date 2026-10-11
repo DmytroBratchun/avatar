@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api/client";
 import type { EditorProject, LookFormat } from "../api/client";
+import SaveToPreset from "./SaveToPreset";
 
 // same order as the backend: top-left, top-right, bottom-right, bottom-left
 const CORNER_NAMES = ["Top left", "Top right", "Bottom right", "Bottom left"];
@@ -127,15 +128,11 @@ export default function RenderSettingsCard({
     mutationFn: (file: File) => api.uploadEditorFrame(file),
     onSuccess: (names) => queryClient.setQueryData(["editorFrames"], names),
   });
-  const defaultMutation = useMutation({
-    mutationFn: () => api.saveEditorDefaultLook(project.id),
-    onSuccess: (look) => queryClient.setQueryData(["editorDefaultLook"], look),
-  });
 
   const busy = disabled || saveMutation.isPending;
   const save = (payload: Patch) => saveMutation.mutate(payload);
   const framed = settings.layout === "framed";
-  const error = (saveMutation.error ?? uploadMutation.error ?? defaultMutation.error) as Error | null;
+  const error = (saveMutation.error ?? uploadMutation.error) as Error | null;
 
   return (
     <div className="card">
@@ -370,14 +367,7 @@ export default function RenderSettingsCard({
       <p className="hint" style={{ marginTop: "0.75rem", marginBottom: 0 }}>
         Changing the look does not re-select footage - render again to apply it.
       </p>
-      <div style={{ marginTop: "0.6rem", display: "flex", gap: "0.5rem", alignItems: "center" }}>
-        <button className="small" onClick={() => defaultMutation.mutate()} disabled={busy || defaultMutation.isPending}>
-          Save as default
-        </button>
-        <span className="hint" style={{ margin: 0 }}>
-          {defaultMutation.isSuccess ? "Saved - new videos will start with this look." : "New videos start with the saved look. Existing ones are not changed."}
-        </span>
-      </div>
+      <SaveToPreset project={project} what="look" save={api.saveLookToPreset} disabled={busy} onChange={onChange} />
       {error && <p className="error-text">{error.message}</p>}
     </div>
   );
