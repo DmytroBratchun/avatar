@@ -8,6 +8,9 @@ import FootageNotesCard from "../components/FootageNotesCard";
 import MusicCard from "../components/MusicCard";
 import QuoteBankCard from "../components/QuoteBankCard";
 import QuotesCard, { AddQuoteCard } from "../components/QuotesCard";
+import FeaturesCard from "../components/FeaturesCard";
+import Help from "../components/Help";
+import ProjectPresetBar from "../components/ProjectPresetBar";
 import RenderSettingsCard from "../components/RenderSettingsCard";
 import SoundEffectsCard from "../components/SoundEffectsCard";
 import { SlotEditor, SlotThumb } from "../components/SlotEditor";
@@ -210,6 +213,8 @@ function BeatRow({
   projectShows,
   projectComics,
   mapName,
+  mapTilt,
+  showBackground,
   playing,
   onPlay,
   disabled,
@@ -219,6 +224,9 @@ function BeatRow({
   projectShows: string[];
   projectComics: string[];
   mapName?: string;
+  mapTilt: number;
+  // the scenery chosen for the beat is used (framed layout, background feature on)
+  showBackground: boolean;
   beat: EditorBeat;
   playing: boolean;
   onPlay: () => void;
@@ -260,7 +268,7 @@ function BeatRow({
                 onClick={() => setOpenSlot(openSlot === i ? null : i)}
               />
             ))}
-            {beat.backgrounds.length > 0 && (
+            {showBackground && beat.backgrounds.length > 0 && (
               <div style={{ width: "64px", marginLeft: "0.4rem", opacity: 0.75 }} title={`Background: ${beat.background_query}`}>
                 <img
                   src={api.keyframeUrl(beat.backgrounds[0].scene_id, 0)}
@@ -289,6 +297,7 @@ function BeatRow({
               projectShows={projectShows}
               projectComics={projectComics}
               mapName={mapName}
+              mapTilt={mapTilt}
               disabled={disabled}
               onChange={onChange}
             />
@@ -312,7 +321,7 @@ export default function EditorProjectPage() {
   // the open tab lives in the URL so a reload or a shared link lands on the same one
   const [searchParams, setSearchParams] = useSearchParams();
   const requested = searchParams.get("tab") as Tab | null;
-  const tab: Tab = requested && TABS.includes(requested) ? requested : "pipeline";
+  const requestedTab: Tab = requested && TABS.includes(requested) ? requested : "pipeline";
   const setTab = (next: Tab) => setSearchParams(next === "pipeline" ? {} : { tab: next }, { replace: true });
 
   const { data: project, error } = useQuery({
@@ -436,14 +445,18 @@ export default function EditorProjectPage() {
       done: project.word_count > 0,
       ready: !!project.audio_file,
     },
-    {
-      key: "quotes",
-      label: "Quotes",
-      description: "Proposes lines from the show to drop in, by reading the episodes. Several Claude calls; you choose which to use. Optional.",
-      state: project.quotes.length > 0 ? `${project.quotes.length} found` : "not run - optional",
-      done: project.quotes.length > 0,
-      ready: project.word_count > 0,
-    },
+    ...(project.features.quotes
+      ? [
+          {
+            key: "quotes" as const,
+            label: "Quotes",
+            description: "Proposes lines from the show to drop in, by reading the episodes. Several Claude calls; you choose which to use. Optional.",
+            state: project.quotes.length > 0 ? `${project.quotes.length} found` : "not run - optional",
+            done: project.quotes.length > 0,
+            ready: project.word_count > 0,
+          },
+        ]
+      : []),
     {
       key: "beats",
       label: "Beats",
@@ -468,7 +481,7 @@ export default function EditorProjectPage() {
       done: slotsFilled > 0,
       ready: slotsWithQueries > 0,
     },
-    ...(project.settings.layout === "framed"
+    ...(project.settings.layout === "framed" && project.features.background
       ? [
           {
             key: "background" as const,
@@ -480,18 +493,22 @@ export default function EditorProjectPage() {
           },
         ]
       : []),
-    {
-      key: "music",
-      label: "Music",
-      description: "Music under the narration: one Claude call divides it into moods, then tracks are composed for each through Lumean. Optional.",
-      state: musicStale
-        ? "planned for other beats - run again"
-        : project.music.length > 0
-          ? `${musicFilled} / ${project.music.length} blocks`
-          : "not run - optional",
-      done: project.music.length > 0 && !musicStale && musicFilled === project.music.length,
-      ready: project.beats.length > 0,
-    },
+    ...(project.features.music
+      ? [
+          {
+            key: "music" as const,
+            label: "Music",
+            description: "Music under the narration: one Claude call divides it into moods, then tracks are composed for each through Lumean. Optional.",
+            state: musicStale
+              ? "planned for other beats - run again"
+              : project.music.length > 0
+                ? `${musicFilled} / ${project.music.length} blocks`
+                : "not run - optional",
+            done: project.music.length > 0 && !musicStale && musicFilled === project.music.length,
+            ready: project.beats.length > 0,
+          },
+        ]
+      : []),
     {
       key: "render",
       label: "Render",
@@ -501,15 +518,20 @@ export default function EditorProjectPage() {
       ready: slotsFilled > 0,
     },
   ];
+  const features = project.features;
   const tabs: { key: Tab; label: string }[] = [
     { key: "pipeline", label: "Pipeline" },
     { key: "voice", label: "Voice" },
-    { key: "music", label: "Music" },
+    ...(features.music || features.sound_effects ? [{ key: "music" as const, label: "Music" }] : []),
     { key: "look", label: "Look" },
-    { key: "quotes", label: project.quotes.length > 0 ? `Quotes ${approvedQuotes}/${project.quotes.length}` : "Quotes" },
+    ...(features.quotes
+      ? [{ key: "quotes" as const, label: project.quotes.length > 0 ? `Quotes ${approvedQuotes}/${project.quotes.length}` : "Quotes" }]
+      : []),
     { key: "clips", label: slots.length > 0 ? `Clips ${slotsFilled}/${slots.length}` : "Clips" },
     { key: "video", label: "Video" },
   ];
+  // a tab of a feature turned off (an old link) falls back to the pipeline
+  const tab: Tab = tabs.some((t) => t.key === requestedTab) ? requestedTab : "pipeline";
   const renderButton = (
     <button
       className="small primary"
@@ -526,12 +548,12 @@ export default function EditorProjectPage() {
         <Link to="/editor">← Videos</Link>
       </p>
       <h1 style={{ marginTop: 0 }}>{project.title}</h1>
+      {/* one line: the preset (opens it in the settings), the world, and only what is unusual */}
       <p className="hint" style={{ marginTop: "-0.5rem" }}>
-        {project.settings.layout === "framed" ? "Framed layout" : "Simple layout"} ·{" "}
-        {projectUniverse ? `${projectUniverse.name} universe · ` : ""}
-        {project.shows.length > 0 ? project.shows.join(", ") : "all its shows"} ·{" "}
-        {project.script_text ? "script attached" : "no script"}
-        {project.llm_cost_usd > 0 && ` · LLM usage $${project.llm_cost_usd.toFixed(2)}`}
+        <ProjectPresetBar project={project} />
+        {projectUniverse && ` · ${projectUniverse.name}`}
+        {project.shows.length > 0 && ` · ${project.shows.join(", ")}`}
+        {project.llm_cost_usd > 0 && ` · $${project.llm_cost_usd.toFixed(2)}`}
       </p>
 
       {/* beat audition on the Clips tab plays through this, whichever tab is open */}
@@ -573,13 +595,14 @@ export default function EditorProjectPage() {
       {tab === "pipeline" && (
         <>
           <div className="card">
-            <h3>Stages</h3>
-            <p className="hint" style={{ marginTop: 0 }}>
-              Hover a name to see what the stage does. Running a stage while another is working puts it in the queue.
-            </p>
+            <h3>
+              Stages
+              <Help text="Hover a stage's name to see what it does. Running a stage while another is working puts it in the queue." />
+            </h3>
             <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.5rem" }}>
-              <label style={{ margin: 0 }} title="A beat longer than this is split into equal clips. Longer clips: fewer cuts and less flicker, but more footage around the moment that was searched for.">
+              <label style={{ margin: 0 }}>
                 Longest clip
+                <Help text="A beat longer than this is split into equal clips. Longer clips: fewer cuts and less flicker, but more footage around the moment that was searched for." />
               </label>
               <select
                 style={{ width: "auto" }}
@@ -626,6 +649,7 @@ export default function EditorProjectPage() {
             ))}
           </div>
 
+          <FeaturesCard project={project} disabled={busy} onChange={setProject} />
           <FootageNotesCard
             key={`${project.id}-visual`}
             project={project}
@@ -648,8 +672,10 @@ export default function EditorProjectPage() {
 
       {tab === "music" && (
         <>
-          <MusicCard project={project} disabled={busy} stale={musicStale} onChange={setProject} onRun={() => runMutation.mutate({ stage: "music" })} />
-          <SoundEffectsCard project={project} disabled={busy} onChange={setProject} />
+          {features.music && (
+            <MusicCard project={project} disabled={busy} stale={musicStale} onChange={setProject} onRun={() => runMutation.mutate({ stage: "music" })} />
+          )}
+          {features.sound_effects && <SoundEffectsCard project={project} disabled={busy} onChange={setProject} />}
         </>
       )}
 
@@ -691,9 +717,11 @@ export default function EditorProjectPage() {
                 )}
               </div>
             </div>
-          <div style={{ marginTop: "0.75rem" }}>
-            <VoiceoverCard project={project} disabled={busy} onChange={setProject} />
-          </div>
+          {features.voiceover && (
+            <div style={{ marginTop: "0.75rem" }}>
+              <VoiceoverCard key={project.preset} project={project} disabled={busy} onChange={setProject} />
+            </div>
+          )}
         </>
       )}
 
@@ -715,11 +743,13 @@ export default function EditorProjectPage() {
           <QuotesCard project={project} disabled={busy} onChange={setProject} />
         ) : (
           <div className="card">
-            <p className="hint">
-              No quotes yet. The search proposes lines from the show that would strengthen the narration; nothing is
-              added to the video until you choose it.
-            </p>
-            <button className="small primary" onClick={() => runMutation.mutate({ stage: "quotes" })} disabled={busy || project.word_count === 0}>
+            <p className="hint">No quotes yet.</p>
+            <button
+              className="small primary"
+              onClick={() => runMutation.mutate({ stage: "quotes" })}
+              disabled={busy || project.word_count === 0}
+              title="Proposes lines from the show that would strengthen the narration. Nothing is added to the video until you choose it."
+            >
               Search for quotes
             </button>
             {project.word_count === 0 && <span className="hint"> Transcribe the narration first.</span>}
@@ -746,8 +776,10 @@ export default function EditorProjectPage() {
                     projectId={project.id}
                     beat={beat}
                     projectShows={availableShows}
-                    projectComics={projectUniverse?.comics ?? []}
-                    mapName={projectUniverse?.map || undefined}
+                    projectComics={features.comics ? (projectUniverse?.comics ?? []) : []}
+                    mapName={(features.maps && projectUniverse?.map) || undefined}
+                    mapTilt={project.settings.map_tilt}
+                    showBackground={features.background && project.settings.layout === "framed"}
                     playing={playingBeat?.id === beat.id}
                     onPlay={() => togglePlay(beat)}
                     disabled={busy}
@@ -769,7 +801,16 @@ export default function EditorProjectPage() {
         <>
           <div className="look-layout">
             <div>
-              <RenderSettingsCard project={project} disabled={busy} format={lookFormat} onFormat={setLookFormat} onChange={setProject} />
+              <RenderSettingsCard
+                // a preset applied from the settings: start again from the look it set
+                key={project.preset}
+                project={project}
+                disabled={busy}
+                format={lookFormat}
+                onFormat={setLookFormat}
+                onChange={setProject}
+                hasMap={!!projectUniverse?.map}
+              />
             </div>
             <LookPreview project={project} format={lookFormat} onFormat={setLookFormat} />
           </div>
@@ -787,8 +828,8 @@ export default function EditorProjectPage() {
                 style={{ width: "100%", maxWidth: "960px", display: "block" }}
               />
               <p className="hint">
-                Rendered {project.rendered_at ? new Date(project.rendered_at).toLocaleString() : ""}. Changes to clips,
-                quotes or the look appear after rendering again.
+                Rendered {project.rendered_at ? new Date(project.rendered_at).toLocaleString() : ""}
+                <Help text="Changes to clips, quotes or the look appear after rendering again." />
               </p>
               <div style={{ display: "flex", gap: "0.5rem", marginBottom: "0.75rem" }}>
                 <button className="small" onClick={() => void api.revealEditorOutput(project.id)}>
@@ -813,7 +854,10 @@ export default function EditorProjectPage() {
           {photoCredits.length > 0 && (
             <div style={{ marginTop: "1rem" }}>
               <div style={{ display: "flex", alignItems: "center", gap: "0.6rem" }}>
-                <h3 style={{ margin: 0 }}>Photo credits</h3>
+                <h3 style={{ margin: 0 }}>
+                  Photo credits
+                  <Help text="The photos in this video are from Wikimedia Commons under licences that ask to name their authors - copy this into the video's description." />
+                </h3>
                 <button
                   className="small"
                   onClick={() => {
@@ -825,10 +869,6 @@ export default function EditorProjectPage() {
                   {creditsCopied ? "Copied ✓" : "Copy"}
                 </button>
               </div>
-              <p className="hint" style={{ marginTop: "0.4rem" }}>
-                The photos in this video are from Wikimedia Commons under licences that ask to name their authors - copy this
-                into the video's description.
-              </p>
               <textarea readOnly value={creditsText} rows={Math.min(12, photoCredits.length + 3)} style={{ width: "100%" }} />
             </div>
           )}

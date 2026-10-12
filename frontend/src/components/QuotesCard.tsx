@@ -2,6 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { api, quoteSeconds, quoteSpans } from "../api/client";
 import type { EditorProject, EditorQuote, EditorWord } from "../api/client";
+import Help from "./Help";
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -399,11 +400,10 @@ export function AddQuoteCard({
 
   return (
     <div className="card" style={{ marginTop: "0.75rem" }}>
-      <h3>Add a clip by hand</h3>
-      <p className="hint" style={{ marginTop: 0 }}>
-        A stretch of an episode you already have in mind, played with its own sound - no search. It goes straight into
-        the video; the scene page of an episode shows exact times for every line and shot.
-      </p>
+      <h3>
+        Add a clip by hand
+        <Help text="A stretch of an episode you already have in mind, played with its own sound - no search. It goes straight into the video; the scene page of an episode shows exact times for every line and shot." />
+      </h3>
       <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
         <select
           style={{ width: "auto", maxWidth: "360px" }}
@@ -483,17 +483,15 @@ export default function QuotesCard({
   return (
     <div className="card">
       <div className="card-header">
-        <h3 style={{ margin: 0 }}>Quotes</h3>
+        <h3 style={{ margin: 0 }}>
+          Quotes
+          <Help text="Clips from the show that play with their own sound between two parts of the narration, shown here between the sentences they would sit between. Hover a quote to see why it was suggested, click a sentence to hear the narration from there. Only quotes you add are used; render again to see them." />
+        </h3>
         <span className="hint" style={{ margin: 0 }}>
           {approved.length} of {project.quotes.length} in the video
           {approved.length > 0 && ` · adds ${added.toFixed(0)}s`}
         </span>
       </div>
-      <p className="hint">
-        Clips from the show that play with their own sound between two parts of the narration, shown here between the
-        sentences they would sit between. Hover a quote to see why it was suggested, click a sentence to hear the
-        narration from there. Only quotes you add are used; render again to see them.
-      </p>
       {project.quotes.map((quote) => (
         <QuoteRow key={`${quote.id}-${quote.clip_start}-${quote.clip_end}-${quote.parts.length}`} project={project} quote={quote} words={words ?? []} disabled={disabled} listening={listening} play={play} onChange={onChange} />
       ))}

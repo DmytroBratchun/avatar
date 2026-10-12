@@ -351,7 +351,7 @@ def run_beats(project_id: str, report: Report) -> None:
     groups = _repair_grouping(result["beats"], len(units))
 
     # A quote plays between two beats, so a beat must end wherever one is placed.
-    live_quotes = [q for q in project.quotes if q.status != "rejected"]
+    live_quotes = [q for q in project.quotes if q.status != "rejected"] if project.features.quotes else []
     for quote in live_quotes:
         unit = next((i for i, (first, last) in enumerate(units) if first <= quote.after_word <= last), len(units) - 1)
         for g, (first_unit, last_unit, summary) in enumerate(groups):
@@ -716,6 +716,8 @@ def run_queries(project_id: str, report: Report) -> None:
                 "shows have nothing that shows it, put what to photograph in photo: a photo from Wikimedia "
                 "Commons is then shown in place of a clip. Still write text_query and visual_query for the "
                 "closest footage, in case no photo is found. Leave photo empty for everything else.\n\n"
+                if project.features.photos
+                else "Leave photo empty: this video shows no photos.\n\n"
             )
             + (
                 "The author's notes on where the material comes from - trust them over your own memory, "
@@ -747,7 +749,7 @@ def run_queries(project_id: str, report: Report) -> None:
                 shot = entry["shots"][min(i, len(entry["shots"]) - 1)]
                 slot.text_query = shot["text_query"].strip()
                 slot.visual_query = shot["visual_query"].strip()
-                slot.photo_query = (shot.get("photo") or "").strip()
+                slot.photo_query = (shot.get("photo") or "").strip() if project.features.photos else ""
                 slot.moment = (shot.get("moment") or "").strip()
                 slot.moment_episodes = (
                     [int(e) for e in shot.get("episodes", []) if int(e) in episode_ids][:3] if slot.moment else []
@@ -916,7 +918,7 @@ def run_select(project_id: str, report: Report) -> None:
                         usage.add(page)
                     report(f"finding footage {n}/{len(slots)}")
                     continue
-                if slot.photo_query.strip():
+                if slot.photo_query.strip() and project.features.photos:
                     report(f"finding footage {n}/{len(slots)} - looking for a photo of {slot.photo_query}")
                     pictures, cost = photos.photo_candidates(project_id, slot, beat.text, photo_cache)
                     photos.save_cache(project_id, photo_cache)
@@ -958,6 +960,12 @@ def run_select(project_id: str, report: Report) -> None:
 # --- quotes -----------------------------------------------------------------
 
 
+def _require(project: store.Project, feature: str) -> None:
+    # a stage queued before its feature was turned off
+    if not getattr(project.features, feature):
+        raise RuntimeError(f"{feature.replace('_', ' ').capitalize()} is turned off for this video")
+
+
 def run_quotes(project_id: str, report: Report) -> None:
     """Proposes quotes from the show to drop into the narration. Nothing is added
     to the video until the user approves a proposal."""
@@ -965,6 +973,7 @@ def run_quotes(project_id: str, report: Report) -> None:
     from app.editor.quotes import find_quotes
 
     project = store.load_project(project_id)
+    _require(project, "quotes")
     words = store.load_words(project_id)
     if not words:
         raise RuntimeError("Transcribe the audio first")
@@ -992,6 +1001,7 @@ def run_background(project_id: str, report: Report) -> None:
     from app.editor.background import choose_backgrounds, write_background_queries
 
     project = store.load_project(project_id)
+    _require(project, "background")
     if not project.beats:
         raise RuntimeError("Build beats first")
 
@@ -1017,6 +1027,7 @@ def run_music(project_id: str, report: Report) -> None:
     one mood, then tracks are composed for every block through Lumean."""
     from app.editor.music import compose
 
+    _require(store.load_project(project_id), "music")
     compose(project_id, report)
 
 

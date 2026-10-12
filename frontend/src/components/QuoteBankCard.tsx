@@ -2,6 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api/client";
 import type { EditorProject } from "../api/client";
+import Help from "./Help";
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -50,11 +51,10 @@ export default function QuoteBankCard({
 
   return (
     <div className="card" style={{ marginTop: "0.75rem" }}>
-      <h3>Quote bank</h3>
-      <p className="hint" style={{ marginTop: 0 }}>
-        Lines people have singled out as worth quoting, already found in your episodes. Added clips can be trimmed
-        afterwards with Edit.
-      </p>
+      <h3>
+        Quote bank
+        <Help text="Lines people have singled out as worth quoting, already found in your episodes. Added clips can be trimmed afterwards with Edit." />
+      </h3>
       <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", flexWrap: "wrap" }}>
         <input
           style={{ width: "260px" }}

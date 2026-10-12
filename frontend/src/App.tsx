@@ -1,6 +1,6 @@
 import ClaudeUsage from "./components/ClaudeUsage";
 import { useEffect, useRef, useState } from "react";
-import { NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { NavLink, Route, Routes, matchPath, useLocation, useNavigate } from "react-router-dom";
 import "./App.css";
 import LibraryPage from "./pages/LibraryPage";
 import LogsPage from "./pages/LogsPage";
@@ -52,8 +52,17 @@ function getInitialTheme(): Theme {
 
 function App() {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // false = closed; otherwise the section it opens on (null = the one last open)
+  const [settingsOpen, setSettingsOpen] = useState<false | string | null>(false);
   const location = useLocation();
+  // on a video's page the settings show that video's preset
+  const editorProjectId = matchPath("/editor/:id", location.pathname)?.params.id;
+  // a page asks for the settings with an "open-settings" event, naming the section
+  useEffect(() => {
+    const open = (e: Event) => setSettingsOpen((e as CustomEvent<string | undefined>).detail ?? null);
+    window.addEventListener("open-settings", open);
+    return () => window.removeEventListener("open-settings", open);
+  }, []);
   const navigate = useNavigate();
   const [app, setApp] = useState<AppName>(() => appForPath(window.location.pathname) ?? getStoredApp());
 
@@ -156,7 +165,7 @@ function App() {
             </div>
           )}
         </div>
-        <button className="theme-toggle" onClick={() => setSettingsOpen(true)} aria-label="Settings" title="Settings">
+        <button className="theme-toggle" onClick={() => setSettingsOpen(null)} aria-label="Settings" title="Settings">
           ⚙
         </button>
         <button
@@ -182,7 +191,9 @@ function App() {
           <Route path="/editor/:id" element={<EditorProjectPage />} />
         </Routes>
       </main>
-      {settingsOpen && <SettingsModal onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen !== false && (
+        <SettingsModal section={settingsOpen ?? undefined} projectId={editorProjectId} onClose={() => setSettingsOpen(false)} />
+      )}
     </div>
   );
 }

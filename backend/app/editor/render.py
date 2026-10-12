@@ -848,7 +848,7 @@ def render_preview(project: Project, slot_index: int, fmt: str | None = None) ->
         cache_dir = store.project_dir(project.id) / "cache"
         cache_dir.mkdir(exist_ok=True)
         out = cache_dir / "preview.jpg"
-        picture = maps.still(chosen.map, max(1, round(duration * FPS)), 0.5)
+        picture = maps.still(maps.with_look(chosen.map, project.settings), max(1, round(duration * FPS)), 0.5)
         cv2.imwrite(str(out), cv2.resize(picture, (1280, 720), interpolation=cv2.INTER_AREA), [cv2.IMWRITE_JPEG_QUALITY, 90])
         return out
     from app.db.session import SessionLocal
@@ -1009,9 +1009,10 @@ def render_project(project_id: str, report) -> None:
         mask = prepare_mask(window[2], window[3], corner_radii(project.settings), folder / "cache")
 
     # Approved quotes play between beats: each goes after the beat whose end is
-    # nearest its position (-1 = before the first beat).
+    # nearest its position (-1 = before the first beat). None with quotes turned off.
     quotes_after: dict[int, list[Quote]] = {}
-    for quote in sorted((q for q in project.quotes if q.status == "approved"), key=lambda q: q.at):
+    approved = [q for q in project.quotes if q.status == "approved"] if project.features.quotes else []
+    for quote in sorted(approved, key=lambda q: q.at):
         if quote.at <= project.beats[0].start + 1e-3:
             index = -1
         else:
@@ -1104,7 +1105,7 @@ def render_project(project_id: str, report) -> None:
             else:
                 shown.append((at, at + frames))
         at += frames
-    if shown:
+    if shown and project.features.background:
         # scenery chosen before its show was made stills-only is left out
         backgrounds = [[b for b in beat.backgrounds if b.source_id not in stills] for beat in project.beats]
         placed = bgtrack.plan(ranges, backgrounds, total_frames, speed)
@@ -1147,8 +1148,9 @@ def render_project(project_id: str, report) -> None:
         if candidate is not None and candidate.kind == "map" and candidate.map is not None:
             # drawn by editor/maps.py rather than an ffmpeg filter graph
             factor = _rate_factor(project.settings)
-            identity = maps.identity(candidate.map, frames, factor)
-            args = functools.partial(maps.render_clip, candidate.map, frames, factor)
+            shot = maps.with_look(candidate.map, project.settings)
+            identity = maps.identity(shot, frames, factor)
+            args = functools.partial(maps.render_clip, shot, frames, factor)
         else:
             args, identity = _segment_args(
                 candidate, frames, project.settings, overlay, window,
@@ -1179,14 +1181,14 @@ def render_project(project_id: str, report) -> None:
     output = output_dir / "video.mp4"
     partial = output_dir / "video.part.mp4"
     narration = str(folder / project.audio_file)
-    if project.settings.sound_effects:
+    if project.features.sound_effects:
         from app.editor.sounds import build_narration
 
         report("adding sound effects")
         narration = str(build_narration(project, folder) or narration)
         report("joining clips with the narration")
     music_track = None
-    if project.settings.music_enabled and project.music:
+    if project.features.music and project.music:
         from app.editor.music import blocks_fit, build_track, refit_blocks
 
         report("mixing the music")

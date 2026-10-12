@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api/client";
 import type { EditorProject, LookFormat } from "../api/client";
+import Help from "./Help";
 import SaveToPreset from "./SaveToPreset";
 
 // same order as the backend: top-left, top-right, bottom-right, bottom-left
@@ -33,7 +34,10 @@ function Slider({
 }) {
   return (
     <div>
-      <label>{label}</label>
+      <label>
+        {label}
+        {hint && <Help text={hint} />}
+      </label>
       <input
         type="range"
         min={min}
@@ -45,11 +49,6 @@ function Slider({
         onPointerUp={onCommit}
         onKeyUp={onCommit}
       />
-      {hint && (
-        <p className="hint" style={{ marginTop: "0.2rem", marginBottom: 0 }}>
-          {hint}
-        </p>
-      )}
     </div>
   );
 }
@@ -99,6 +98,7 @@ export default function RenderSettingsCard({
   format,
   onFormat,
   onChange,
+  hasMap = false,
 }: {
   project: EditorProject;
   disabled: boolean;
@@ -106,6 +106,8 @@ export default function RenderSettingsCard({
   format: LookFormat;
   onFormat: (format: LookFormat) => void;
   onChange: (project: EditorProject) => void;
+  // the project's world has a map, so map shots can be made
+  hasMap?: boolean;
 }) {
   const queryClient = useQueryClient();
   const { data: frames } = useQuery({ queryKey: ["editorFrames"], queryFn: api.listEditorFrames });
@@ -119,6 +121,7 @@ export default function RenderSettingsCard({
   const [radii, setRadii] = useState<number[] | null>(settings.corner_radii);
   const [speed, setSpeed] = useState(settings.background_speed);
   const [wideFill, setWideFill] = useState(settings.wide_fill);
+  const [tilt, setTilt] = useState(settings.map_tilt);
 
   const saveMutation = useMutation({
     mutationFn: (payload: Patch) => api.updateEditorProject(project.id, payload),
@@ -136,7 +139,10 @@ export default function RenderSettingsCard({
 
   return (
     <div className="card">
-      <h3>Look</h3>
+      <h3>
+        Look
+        <Help text="Changing the look does not re-select footage - render again to apply it." />
+      </h3>
 
       <Section title="Whole video" subtitle="applies to every clip" defaultOpen>
         <label>Layout</label>
@@ -162,20 +168,22 @@ export default function RenderSettingsCard({
             onCommit={() => save({ dim })}
           />
         </div>
-        <div className="field-row" style={{ marginTop: "0.5rem" }}>
-          <Slider
-            label={`Background speed: ${Math.round(speed * 100)}%`}
-            hint="Slows the scenery in the background. Each shot lasts longer, so it changes less often."
-            value={speed}
-            min={0.25}
-            max={1}
-            step={0.05}
-            disabled={busy}
-            onChange={setSpeed}
-            onCommit={() => save({ background_speed: speed })}
-          />
-          <div />
-        </div>
+        {framed && project.features.background && (
+          <div className="field-row" style={{ marginTop: "0.5rem" }}>
+            <Slider
+              label={`Background speed: ${Math.round(speed * 100)}%`}
+              hint="Slows the scenery in the background. Each shot lasts longer, so it changes less often."
+              value={speed}
+              min={0.25}
+              max={1}
+              step={0.05}
+              disabled={busy}
+              onChange={setSpeed}
+              onCommit={() => save({ background_speed: speed })}
+            />
+            <div />
+          </div>
+        )}
       </Section>
 
       {framed && (
@@ -216,7 +224,10 @@ export default function RenderSettingsCard({
           </div>
 
           <div style={{ marginTop: "0.5rem" }}>
-            <label>Corner rounding: {radii ? "per corner" : radius === 0 ? "off" : `${radius}px`}</label>
+            <label>
+              Corner rounding: {radii ? "per corner" : radius === 0 ? "off" : `${radius}px`}
+              <Help text="Rounds the clip so its corners don't stick out from under the frame." />
+            </label>
             {!radii && (
               <input
                 type="range"
@@ -263,12 +274,12 @@ export default function RenderSettingsCard({
                 ))}
               </div>
             )}
-            <p className="hint" style={{ marginTop: "0.2rem", marginBottom: 0 }}>
-              Rounds the clip so its corners don't stick out from under the frame.
-            </p>
           </div>
 
-          <label style={{ marginTop: "0.6rem", fontSize: "0.8rem" }}>Add a frame image</label>
+          <label style={{ marginTop: "0.6rem", fontSize: "0.8rem" }}>
+            Add a frame image
+            <Help text="A PNG with a transparent opening in the middle. The clip is placed under it, sized to the opening." />
+          </label>
           <input
             type="file"
             accept=".png,image/png"
@@ -278,9 +289,6 @@ export default function RenderSettingsCard({
               if (file) uploadMutation.mutate(file);
             }}
           />
-          <p className="hint" style={{ marginTop: "0.3rem", marginBottom: 0 }}>
-            A PNG with a transparent opening in the middle. The clip is placed under it, sized to the opening.
-          </p>
         </Section>
       )}
 
@@ -295,11 +303,8 @@ export default function RenderSettingsCard({
               onChange={(e) => save({ wide_full_screen: e.target.checked })}
             />
             Fill the screen, without the frame
+            <Help text="Off: these clips are cropped into the frame like 4:3 footage. This also decides whether wider footage (below) gets the frame." />
           </label>
-          <p className="hint" style={{ marginTop: "0.2rem", marginBottom: 0 }}>
-            Off: these clips are cropped into the frame like 4:3 footage. This also decides whether wider footage
-            (below) gets the frame.
-          </p>
         </Section>
       )}
 
@@ -317,6 +322,7 @@ export default function RenderSettingsCard({
         />
       </Section>
 
+      {project.features.comics && (
       <Section
         title="Comic pages"
         subtitle="a page scrolling down or up the screen, in place of a clip"
@@ -324,8 +330,9 @@ export default function RenderSettingsCard({
         active={format === "comic"}
         onFocus={onFormat}
       >
-        <label title="How wide a comic page is shown, as a share of the screen. Wider: more of the page to scroll through, but a softer picture - the scans are small.">
+        <label>
           Page width
+          <Help text="How wide a comic page is shown, as a share of the screen. Wider: more of the page to scroll through, but a softer picture - the scans are small. At 100% the page covers the screen, so no background is drawn behind it and the clip renders faster." />
         </label>
         <select
           style={{ width: "auto" }}
@@ -339,16 +346,10 @@ export default function RenderSettingsCard({
             </option>
           ))}
         </select>
-        <p className="hint" style={{ marginTop: "0.2rem", marginBottom: 0 }}>
-          Wider: more of the page to scroll through, but a softer picture - the scans are small. At 100% the page
-          covers the screen, so no background is drawn behind it and the clip renders faster.
-        </p>
 
-        <label
-          style={{ marginTop: "0.6rem" }}
-          title="How fast a page may scroll. A page shown only briefly then shows just the part it has time for, from its top (or its bottom, when it scrolls up), instead of racing to the end."
-        >
+        <label style={{ marginTop: "0.6rem" }}>
           Fastest scroll
+          <Help text="How fast a page may scroll. A page shown only briefly then shows just the part it has time for, from its top (or its bottom, when it scrolls up), instead of racing to the end." />
         </label>
         <select
           style={{ width: "auto" }}
@@ -363,11 +364,27 @@ export default function RenderSettingsCard({
           ))}
         </select>
       </Section>
+      )}
 
-      <p className="hint" style={{ marginTop: "0.75rem", marginBottom: 0 }}>
-        Changing the look does not re-select footage - render again to apply it.
-      </p>
-      <SaveToPreset project={project} what="look" save={api.saveLookToPreset} disabled={busy} onChange={onChange} />
+      {hasMap && project.features.maps && (
+        <Section title="Map shots" subtitle="a journey drawn on the map of the world">
+          <Slider
+            label={`Camera tilt: ${Math.round(tilt)}°`}
+            hint="How far the camera leans from looking straight down at the map on the table. 0° is a flat map; more shows it in perspective, the far side smaller, and on a long journey the table beyond the map's far edge. Applies to every map shot that doesn't set its own."
+            value={tilt}
+            min={0}
+            max={70}
+            step={5}
+            disabled={busy}
+            onChange={setTilt}
+            onCommit={() => save({ map_tilt: tilt })}
+          />
+        </Section>
+      )}
+
+      <div style={{ marginTop: "0.75rem" }}>
+        <SaveToPreset project={project} what="look" save={api.saveLookToPreset} disabled={busy} />
+      </div>
       {error && <p className="error-text">{error.message}</p>}
     </div>
   );

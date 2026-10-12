@@ -5,6 +5,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import type { EditorProjectSummary } from "../api/client";
 import VoiceTextTools from "../components/VoiceTextTools";
+import Help from "../components/Help";
 
 function formatDuration(seconds: number | null): string {
   if (seconds == null) return "-";
@@ -121,11 +122,10 @@ function ProjectsRootCard({ root }: { root: string | null }) {
 
   return (
     <div className="card">
-      <h3>Projects folder</h3>
-      <p className="hint">
-        Each video gets its own sub-folder here with its audio, transcript and project state. Changing this does not
-        move existing projects.
-      </p>
+      <h3>
+        Projects folder
+        <Help text="Each video gets its own sub-folder here with its audio, transcript and project state. Changing this does not move existing projects." />
+      </h3>
       <div style={{ display: "flex", gap: "0.5rem" }}>
         <input
           style={{ flex: 1 }}
@@ -159,11 +159,11 @@ type NewVideoTab = (typeof NEW_VIDEO_TABS)[number]["id"];
 function FormRow({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <div className="form-row">
-      <label>{label}</label>
-      <div>
-        {children}
-        {hint && <p className="hint" style={{ margin: "0.3rem 0 0" }}>{hint}</p>}
-      </div>
+      <label>
+        {label}
+        {hint && <Help text={hint} />}
+      </label>
+      <div>{children}</div>
     </div>
   );
 }

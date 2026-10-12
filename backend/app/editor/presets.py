@@ -1,7 +1,7 @@
 """Presets: named sets of what a new video starts with - a channel, a series, a
-language. A preset holds the universe and shows, the look, the voice, the visual
-wishes, the footage prompt, the instructions for "Optimize for voice" and whether
-to run to the end. A new video copies them from the preset it is made from, so
+language. A preset holds the universe and shows, the features its videos use, the
+look, the voice, the visual wishes, the footage prompt, the instructions for
+"Optimize for voice" and whether to run to the end. A new video copies them from the preset it is made from, so
 editing a preset later leaves existing videos alone; the project remembers its
 preset, and the "save to preset" buttons on a project write back to it.
 
@@ -13,7 +13,7 @@ import json
 import re
 import threading
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.config import DATA_DIR
 from app.services.runtime_settings import _read_raw
@@ -23,11 +23,37 @@ DEFAULT_ID = "default"
 _lock = threading.Lock()
 
 
+class Features(BaseModel):
+    """What a video uses besides footage under the narration. A feature turned off
+    is gone from the project's page - its tab, stage, settings and buttons - and
+    no stage asks for it or renders it, so it costs nothing."""
+
+    background: bool = True  # scenery behind framed clips (the background stage)
+    music: bool = True  # music under the narration (the music stage)
+    sound_effects: bool = True  # page turns and camera shutters (editor/sounds.py)
+    quotes: bool = True  # lines from the show dropped into the narration
+    photos: bool = True  # Wikimedia Commons photos for shots about the real world
+    comics: bool = True  # comic pages in place of clips
+    maps: bool = True  # journeys drawn on the world's map
+    voiceover: bool = True  # the script voiced through Lumean (the Voice tab)
+
+
+def features_from_look(look: dict) -> dict:
+    """Features of something saved before features existed, from the switches its
+    look held then."""
+    return {
+        "music": look.get("music_enabled", True),
+        "sound_effects": look.get("sound_effects", True),
+        "background": look.get("background_scenery", True),
+    }
+
+
 class Preset(BaseModel):
     id: str
     name: str
     universe: str = ""  # empty: chosen for each video
     shows: list[str] = Field(default_factory=list)  # empty: all of the universe's shows
+    features: Features = Field(default_factory=Features)
     # a RenderSettings and a voiceover.VoiceSettings as dicts: validated where they
     # are used, so a field added there later just falls back to its default
     look: dict = Field(default_factory=dict)
@@ -36,6 +62,13 @@ class Preset(BaseModel):
     footage_notes: str = ""
     voice_instructions: str = ""  # what "Optimize for voice" is told about the delivery
     run_all: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _features_from_look(cls, data):
+        if isinstance(data, dict) and "features" not in data:
+            data = {**data, "features": features_from_look(data.get("look") or {})}
+        return data
 
 
 def _from_old_settings() -> Preset:

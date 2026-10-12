@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api/client";
 import type { EditorMapShot, EditorProject, MapPlace } from "../api/client";
+import Help from "./Help";
 
 /** A map shot for a slot: a journey from one place to another drawn on the map of
  * the project's world, along one of the known journeys or straight, with pictures
@@ -12,6 +13,7 @@ export default function MapShotDialog({
   slotIndex,
   mapName,
   current,
+  defaultTilt,
   onChange,
   onClose,
 }: {
@@ -21,6 +23,8 @@ export default function MapShotDialog({
   mapName: string;
   // the slot's map shot, if it has one: the dialog starts from it
   current?: EditorMapShot | null;
+  // the project's map tilt (Look tab), used unless this shot sets its own
+  defaultTilt: number;
   onChange: (project: EditorProject) => void;
   onClose: () => void;
 }) {
@@ -32,9 +36,11 @@ export default function MapShotDialog({
   const [pictures, setPictures] = useState<string[]>(current?.pictures ?? []);
   const [describing, setDescribing] = useState<string | null>(null); // place whose picture is being asked for
   const [what, setWhat] = useState("");
+  // null: follow the Look tab
+  const [tilt, setTilt] = useState<number | null>(current?.tilt ?? null);
 
   const save = useMutation({
-    mutationFn: () => api.setEditorSlotMap(projectId, beatId, slotIndex, { places: [from, to], route, pictures: pictures.filter((p) => p === from || p === to) }),
+    mutationFn: () => api.setEditorSlotMap(projectId, beatId, slotIndex, { places: [from, to], route, pictures: pictures.filter((p) => p === from || p === to), tilt }),
     onSuccess: (project) => {
       onChange(project);
       onClose();
@@ -112,7 +118,10 @@ export default function MapShotDialog({
     >
       <div className="card" style={{ width: "min(620px, 94vw)" }} onClick={(e) => e.stopPropagation()}>
         <div className="card-header">
-          <h2 style={{ margin: 0, fontSize: "1rem" }}>Map{map ? ` of ${map.title}` : ""}</h2>
+          <h2 style={{ margin: 0, fontSize: "1rem" }}>
+            Map{map ? ` of ${map.title}` : ""}
+            <Help text="The way from one place to another is drawn across the map while the camera follows it. Using it replaces the slot's clip and locks it." />
+          </h2>
           <button className="ghost small" onClick={onClose}>
             Close
           </button>
@@ -121,9 +130,6 @@ export default function MapShotDialog({
           <p className="hint">{loadError ? "" : "Loading the map…"}</p>
         ) : (
           <>
-            <p className="hint" style={{ marginTop: 0 }}>
-              The way from one place to another is drawn across the map while the camera follows it.
-            </p>
             <div style={{ display: "flex", gap: "0.6rem", flexWrap: "wrap" }}>
               <div style={{ flex: 1, minWidth: "12rem" }}>
                 <label style={{ fontSize: "0.8rem" }}>From</label>
@@ -157,15 +163,22 @@ export default function MapShotDialog({
                 </option>
               ))}
             </select>
+            <label className="form-inline-check" style={{ marginTop: "0.5rem" }}>
+              <input type="checkbox" checked={tilt !== null} onChange={(e) => setTilt(e.target.checked ? defaultTilt : null)} />
+              Own camera tilt {tilt === null && <span className="hint" style={{ margin: 0 }}>· {Math.round(defaultTilt)}° from the Look tab</span>}
+            </label>
+            {tilt !== null && (
+              <>
+                <label style={{ fontSize: "0.8rem" }}>Camera tilt: {Math.round(tilt)}°</label>
+                <input type="range" min={0} max={70} step={5} value={tilt} onChange={(e) => setTilt(Number(e.target.value))} />
+              </>
+            )}
             {placeRow("From", byId.get(from))}
             {to !== from && placeRow("To", byId.get(to))}
             <div style={{ marginTop: "0.9rem", display: "flex", gap: "0.5rem", alignItems: "center" }}>
               <button onClick={() => save.mutate()} disabled={!from || !to || from === to || save.isPending}>
                 {save.isPending ? "Saving…" : "Use this map"}
               </button>
-              <span className="hint" style={{ margin: 0 }}>
-                Replaces the slot's clip and locks it.
-              </span>
             </div>
             {map.credit && (
               <p className="hint" style={{ fontSize: "0.7rem", marginBottom: 0 }}>

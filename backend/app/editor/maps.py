@@ -149,6 +149,13 @@ def label(shot: MapShot, place_id: str) -> str:
     return places(shot.map).get(place_id, {}).get("name", place_id)
 
 
+def with_look(shot: MapShot, settings) -> MapShot:
+    """The shot with what it leaves to the project's look filled in (the tilt)."""
+    if shot.tilt is not None:
+        return shot
+    return shot.model_copy(update={"tilt": settings.map_tilt})
+
+
 def describe(shot: MapShot) -> str:
     names = [label(shot, p) for p in shot.places]
     return "Map: " + " → ".join(names)

@@ -150,6 +150,7 @@ export function SlotEditor({
   projectShows,
   projectComics = [],
   mapName,
+  mapTilt = 50,
   disabled,
   onChange,
 }: {
@@ -162,6 +163,8 @@ export function SlotEditor({
   projectComics?: string[];
   // the map of the project's world, for map shots; none = no map
   mapName?: string;
+  // the project's map tilt (Look tab)
+  mapTilt?: number;
   disabled: boolean;
   onChange: (project: EditorProject) => void;
 }) {
@@ -503,6 +506,7 @@ export function SlotEditor({
             beatId={beatId}
             slotIndex={slotIndex}
             mapName={mapName}
+            defaultTilt={mapTilt}
             current={selected?.kind === "map" ? selected.map : slot.candidates.find((c) => c.kind === "map")?.map}
             onChange={onChange}
             onClose={() => setMapping(false)}

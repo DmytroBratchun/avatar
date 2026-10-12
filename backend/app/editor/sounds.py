@@ -175,7 +175,7 @@ def placements(project: Project) -> list[tuple[float, Path]]:
 def build_narration(project: Project, folder: Path) -> Path | None:
     """The narration with the effects mixed in, cached by what goes into it; None
     when there are no effects to add."""
-    if not project.settings.sound_effects or not project.audio_file:
+    if not project.features.sound_effects or not project.audio_file:
         return None
     placed = placements(project)
     if not placed:

@@ -2,6 +2,7 @@ import { keepPreviousData, useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api/client";
 import type { EditorMusicBlock, EditorProject, MusicLibraryUsage } from "../api/client";
+import Help from "./Help";
 
 // seconds two neighbouring tracks play together (the backend's OVERLAP)
 const OVERLAP = 3;
@@ -130,7 +131,7 @@ export default function MusicCard({
 }) {
   const [level, setLevel] = useState(project.settings.music_level);
   const settings = useMutation({
-    mutationFn: (payload: { music_enabled?: boolean; music_level?: number; music_library_only?: boolean }) =>
+    mutationFn: (payload: { music_level?: number; music_library_only?: boolean }) =>
       api.updateEditorProject(project.id, payload),
     onSuccess: onChange,
   });
@@ -148,30 +149,18 @@ export default function MusicCard({
   return (
     <div className="card">
       <div className="card-header">
-        <h3 style={{ margin: 0 }}>Music</h3>
+        <h3 style={{ margin: 0 }}>
+          Music
+          <Help text="The narration is divided into blocks of one mood and each gets its own music, composed through Lumean: several different tracks per block, one fading into the next, none played twice. All of it plays at one level under the voice, and stops for quotes, which keep the show's own sound. Render again to hear a change." />
+        </h3>
         <span className="hint" style={{ margin: 0 }}>
           {project.music.length > 0
             ? `${project.music.length} blocks · ${project.music.reduce((n, b) => n + b.tracks.length, 0)} tracks`
             : "not composed yet"}
         </span>
       </div>
-      <p className="hint">
-        The narration is divided into blocks of one mood and each gets its own music, composed through Lumean: several
-        different tracks per block, one fading into the next, none played twice. All of it plays at one level under the
-        voice, and stops for quotes, which keep the show's own sound. Render again to hear a change.
-      </p>
 
       <div style={{ display: "flex", gap: "1rem", alignItems: "center", flexWrap: "wrap", marginBottom: "0.5rem" }}>
-        <label style={{ display: "flex", alignItems: "center", gap: "0.4rem", margin: 0, cursor: "pointer" }}>
-          <input
-            type="checkbox"
-            style={{ width: "auto" }}
-            checked={project.settings.music_enabled}
-            disabled={busy}
-            onChange={(e) => settings.mutate({ music_enabled: e.target.checked })}
-          />
-          Music in the video
-        </label>
         {library?.enabled && (
           <label
             style={{ display: "flex", alignItems: "center", gap: "0.4rem", margin: 0, cursor: "pointer" }}

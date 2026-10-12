@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { api } from "../api/client";
 import type { EditorProject, LookFormat } from "../api/client";
+import Help from "./Help";
 
 const FORMATS: { key: LookFormat; label: string }[] = [
   { key: "4:3", label: "4:3" },
@@ -50,7 +51,10 @@ export default function LookPreview({
     <div className="card look-preview">
       <div className="card-header">
         <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-          <h3 style={{ margin: 0 }}>Preview</h3>
+          <h3 style={{ margin: 0 }}>
+            Preview
+            <Help text="One still with the current settings; it updates as you change them. The background comes from the last render - before the first render it is a blurred copy of the clip." />
+          </h3>
           {FORMATS.map((f) => (
             <button key={f.key} className={f.key === format ? "small primary" : "small ghost"} onClick={() => onFormat(f.key)}>
               {f.label}
@@ -92,8 +96,7 @@ export default function LookPreview({
         />
       )}
       <p className="hint" style={{ marginBottom: 0 }}>
-        {current ? SOURCE_NOTES[current.source] : "Loading…"} One still with the current settings; it updates as you change
-        them. The background comes from the last render - before the first render it is a blurred copy of the clip.
+        {current ? SOURCE_NOTES[current.source] : "Loading…"}
       </p>
     </div>
   );

@@ -261,7 +261,8 @@ export interface EditorMapShot {
   places: string[];
   route: string;
   pictures: string[];
-  tilt: number;
+  // null: the project's map_tilt
+  tilt: number | null;
 }
 
 export interface MapPlace {
@@ -407,6 +408,7 @@ export interface EditorPreset {
   name: string;
   universe: string; // "" = chosen for each video
   shows: string[]; // [] = all of the universe's shows
+  features: EditorFeatures;
   look: Partial<EditorProject["settings"]>;
   voice: Partial<VoiceSettings>;
   visual_notes: string;
@@ -415,7 +417,9 @@ export interface EditorPreset {
   run_all: boolean;
 }
 
-export type EditorPresetPatch = Partial<Pick<EditorPreset, "name" | "universe" | "shows" | "visual_notes" | "footage_notes" | "voice_instructions" | "run_all">>;
+export type EditorPresetPatch = Partial<Pick<EditorPreset, "name" | "universe" | "shows" | "visual_notes" | "footage_notes" | "voice_instructions" | "run_all">> & {
+  features?: Partial<EditorFeatures>;
+};
 
 export interface VoiceSettings {
   voice_id: string;
@@ -534,6 +538,18 @@ export interface EditorProjectSummary {
   job: EditorJob | null;
 }
 
+// what a video uses besides footage (backend presets.Features); off = hidden and not run
+export interface EditorFeatures {
+  background: boolean;
+  music: boolean;
+  sound_effects: boolean;
+  quotes: boolean;
+  photos: boolean;
+  comics: boolean;
+  maps: boolean;
+  voiceover: boolean;
+}
+
 export interface EditorProject {
   version: number;
   id: string;
@@ -549,6 +565,7 @@ export interface EditorProject {
   unlock_before?: string[];
   shows: string[];
   preset: string;
+  features: EditorFeatures;
   settings: {
     layout: "framed" | "simple";
     search_mode: "smart_hybrid" | "text" | "visual";
@@ -564,13 +581,12 @@ export interface EditorProject {
     wide_full_screen: boolean;
     wide_fill: number;
     background_speed: number;
+    map_tilt: number;
     quote_cuts: boolean;
-    music_enabled: boolean;
     music_level: number;
     music_library_only: boolean;
     comic_width: number;
     comic_max_speed: number;
-    sound_effects: boolean;
     sfx_volume: number;
     frame_rate: number;
   };
@@ -706,6 +722,10 @@ export const api = {
   getEditorProject: (id: string) => request<EditorProject>(`/api/editor/projects/${id}`),
   // deletes the project folder; `left` lists files that could not be removed (open elsewhere)
   deleteEditorProject: (id: string) => request<{ left: string[] }>(`/api/editor/projects/${id}`, { method: "DELETE" }),
+  // copies the preset's features, look and voice into the project and makes it the project's preset
+  applyPreset: (id: string, preset: string) =>
+    request<EditorProject>(`/api/editor/projects/${id}/apply-preset`, { method: "POST", body: JSON.stringify({ preset }) }),
+  saveFeaturesToPreset: (id: string) => request<EditorPreset>(`/api/editor/projects/${id}/save-features-to-preset`, { method: "POST" }),
   saveLookToPreset: (id: string) => request<EditorPreset>(`/api/editor/projects/${id}/save-look-to-preset`, { method: "POST" }),
   listPresets: () => request<EditorPreset[]>("/api/editor/presets"),
   createPreset: (name: string, copy_from: string) =>
@@ -744,6 +764,7 @@ export const api = {
       footage_notes?: string;
       visual_notes?: string;
       shows?: string[];
+      features?: Partial<EditorFeatures>;
       layout?: string;
       search_mode?: string;
       max_clip_seconds?: number;
@@ -755,15 +776,14 @@ export const api = {
       corner_radius?: number;
       corner_radii?: number[] | null;
       background_speed?: number;
+      map_tilt?: number;
       wide_full_screen?: boolean;
       wide_fill?: number;
       quote_cuts?: boolean;
-      music_enabled?: boolean;
       music_level?: number;
       music_library_only?: boolean;
       comic_width?: number;
       comic_max_speed?: number;
-      sound_effects?: boolean;
       sfx_volume?: number;
       frame_rate?: number;
     }
@@ -808,7 +828,7 @@ export const api = {
     id: string,
     beatId: string,
     slotIndex: number,
-    payload: { places: string[]; route: string; pictures: string[]; tilt?: number },
+    payload: { places: string[]; route: string; pictures: string[]; tilt?: number | null },
   ) =>
     request<EditorProject>(`/api/editor/projects/${id}/beats/${beatId}/slots/${slotIndex}/map`, {
       method: "POST",

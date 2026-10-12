@@ -65,7 +65,15 @@ const SECTIONS = [
 type Section = (typeof SECTIONS)[number]["id"];
 const SECTION_KEY = "settings-section";
 
-export default function SettingsModal({ onClose }: { onClose: () => void }) {
+export default function SettingsModal({
+  onClose,
+  section: openOn,
+  projectId,
+}: {
+  onClose: () => void;
+  section?: string; // the section to open on; without it, the one open last time
+  projectId?: string; // the video whose page it was opened on: Presets shows its preset
+}) {
   const queryClient = useQueryClient();
   const { data: settings, isLoading } = useQuery({ queryKey: ["settings"], queryFn: api.getSettings });
 
@@ -81,6 +89,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const [defaultModel, setDefaultModel] = useState("sonnet");
   const [taskModels, setTaskModels] = useState<Record<string, string>>({});
   const [section, setSection] = useState<Section>(() => {
+    if (SECTIONS.some((s) => s.id === openOn)) return openOn as Section;
     try {
       const stored = localStorage.getItem(SECTION_KEY);
       return SECTIONS.some((s) => s.id === stored) ? (stored as Section) : "models";
@@ -275,7 +284,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                     </button>
                   </div>
                   <p className="hint" style={{ marginTop: "0.4rem" }}>
-                    Not used yet (planned: characters for the editor). Blank: <code>OPENAI_API_KEY</code>.
+                    For pictures of places on the map (GPT Image, paid). Blank: <code>OPENAI_API_KEY</code>.
                   </p>
 
                   <p className="hint" style={{ margin: "0.75rem 0 0" }}>
@@ -283,7 +292,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                   </p>
                   </>
                 )}
-                {section === "presets" && <PresetsPane />}
+                {section === "presets" && <PresetsPane projectId={projectId} />}
                 {section === "usage" && (
                   <>
                     <p className="hint" style={{ marginTop: 0 }}>Where the money and quota go.</p>

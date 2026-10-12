@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { EditorProject } from "../api/client";
+import Help from "./Help";
 
 const USED_FOR: Record<string, string> = {
   comic: "when a comic page comes on screen",
@@ -25,33 +26,24 @@ export default function SoundEffectsCard({
     onSuccess: (list) => queryClient.setQueryData(["editorSounds"], list),
   });
   const settings = useMutation({
-    mutationFn: (payload: { sound_effects?: boolean; sfx_volume?: number }) => api.updateEditorProject(project.id, payload),
+    mutationFn: (payload: { sfx_volume?: number }) => api.updateEditorProject(project.id, payload),
     onSuccess: onChange,
   });
 
   return (
     <div className="card" style={{ marginTop: "0.75rem" }}>
-      <h3>Sound effects</h3>
-      <p className="hint" style={{ marginTop: 0 }}>
-        Short standard sounds, generated once through Lumean and reused by every project. Changes are heard after rendering again.
-      </p>
+      <h3>
+        Sound effects
+        <Help text="Short standard sounds, generated once through Lumean and reused by every project. Changes are heard after rendering again." />
+      </h3>
       <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap", marginBottom: "0.6rem" }}>
-        <label style={{ margin: 0, display: "flex", gap: "0.35rem", alignItems: "center" }}>
-          <input
-            type="checkbox"
-            checked={project.settings.sound_effects}
-            disabled={disabled || settings.isPending}
-            onChange={(e) => settings.mutate({ sound_effects: e.target.checked })}
-          />
-          Use in this video
-        </label>
         <label style={{ margin: 0 }} title="How far below their full level the effects play, in dB">
           Volume
         </label>
         <select
           style={{ width: "auto" }}
           value={project.settings.sfx_volume}
-          disabled={disabled || settings.isPending || !project.settings.sound_effects}
+          disabled={disabled || settings.isPending}
           onChange={(e) => settings.mutate({ sfx_volume: Number(e.target.value) })}
         >
           {[6, 9, 12, 15, 18, 22, 26, 30, 35, 40].map((n) => (

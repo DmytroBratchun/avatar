@@ -85,7 +85,9 @@ class MapShot(BaseModel):
     places: list[str]  # place ids in the order travelled; the first and last are named
     route: str = ""  # a journey to follow between them; empty = straight through the places
     pictures: list[str] = Field(default_factory=list)  # places shown in a medallion
-    tilt: float = 50.0  # degrees the camera leans from looking straight down
+    # degrees the camera leans from looking straight down; None = the project's
+    # map_tilt (Look tab), so changing that there changes every such shot
+    tilt: float | None = None
 
 
 class Candidate(MediaFile):
@@ -295,9 +297,8 @@ class RenderSettings(BaseModel):
     # Experimental, quotes stage: a proposed quote may be cut together from two or
     # three pieces of a longer speech or exchange instead of one continuous stretch.
     quote_cuts: bool = False
-    # music under the narration (the music stage): whether the video has it, and how
-    # much quieter than the voice it plays, in loudness units
-    music_enabled: bool = True
+    # music under the narration (the music stage): how much quieter than the voice
+    # it plays, in loudness units. Whether there is music at all is Project.features.
     music_level: float = 18.0
     # how wide a comic page is shown, as a share of the screen's width. Wider means
     # more of the page to scroll through, and a softer picture: the scans are small
@@ -309,8 +310,10 @@ class RenderSettings(BaseModel):
     music_library_only: bool = False
     # standard sound effects (editor/sounds.py) at the start of comic pages and photos,
     # played this many dB below their normalised peak
-    sound_effects: bool = True
     sfx_volume: float = 12.0
+    # map shots (editor/maps.py): degrees the camera leans from looking straight down
+    # at the map, for every shot that doesn't set its own
+    map_tilt: float = 50.0
     # 24: the footage's own 23.976 fps. 48: twice that - footage shows each frame
     # twice, but a scrolling comic page or panning photo moves half as far per frame
     frame_rate: int = 24
@@ -343,6 +346,8 @@ class Project(BaseModel):
     shows: list[str] = Field(default_factory=list)
     # the preset it was made from (editor/presets.py): its "save to preset" buttons write there
     preset: str = ""
+    # what the video uses besides footage (presets.Features), copied from its preset
+    features: presets.Features = Field(default_factory=presets.Features)
     settings: RenderSettings = Field(default_factory=RenderSettings)
     word_count: int = 0
     timeline: list[Segment] = Field(default_factory=list)
@@ -357,6 +362,14 @@ class Project(BaseModel):
     queue: list[str] = Field(default_factory=list)
     # stages that are to re-pick the clips the user locked too, the next time they run
     unlock_before: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _features_from_settings(cls, data):
+        # a project saved before features kept their switches in its settings
+        if isinstance(data, dict) and "features" not in data:
+            data = {**data, "features": presets.features_from_look(data.get("settings") or {})}
+        return data
 
 
 def now() -> str:
@@ -428,6 +441,8 @@ def project_universe(project: "Project") -> Universe:
 def project_comics(project: "Project") -> list[str]:
     """Comics of the project's universe. A clip is looked for in one only when its
     shot was written for that comic (Slot.shows names it)."""
+    if not project.features.comics:
+        return []
     return list(project_universe(project).comics)
 
 
@@ -464,6 +479,7 @@ def create_project(
             universe=universe,
             shows=shows,
             preset=presets.get(preset).id,
+            features=presets.get(preset).features.model_copy(),
             settings=default_settings(layout, preset),
         )
         _write_json(root / project_id / PROJECT_FILE, project.model_dump())

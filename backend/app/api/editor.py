@@ -53,6 +53,7 @@ class ProjectUpdateIn(BaseModel):
     footage_notes: str | None = None
     visual_notes: str | None = None
     shows: list[str] | None = None
+    features: dict[str, bool] | None = None  # the features to change, by name (presets.Features)
     layout: str | None = None
     search_mode: str | None = None
     max_clip_seconds: float | None = None
@@ -65,16 +66,28 @@ class ProjectUpdateIn(BaseModel):
     frame_scale: float | None = None
     corner_radii: list[int] | None = None
     background_speed: float | None = None
+    map_tilt: float | None = None
     wide_full_screen: bool | None = None
     quote_cuts: bool | None = None
-    music_enabled: bool | None = None
     music_level: float | None = None
     music_library_only: bool | None = None
     comic_width: float | None = None
     comic_max_speed: float | None = None
-    sound_effects: bool | None = None
     sfx_volume: float | None = None
     frame_rate: int | None = None
+
+
+def _with_features(features: presets.Features, changes: dict[str, bool]) -> presets.Features:
+    unknown = set(changes) - set(presets.Features.model_fields)
+    if unknown:
+        raise HTTPException(400, f"Unknown feature: {', '.join(sorted(unknown))}")
+    return features.model_copy(update={name: bool(on) for name, on in changes.items()})
+
+
+def _require(project: Project, feature: str, what: str) -> None:
+    """Refuses work for a feature the project has turned off."""
+    if not getattr(project.features, feature):
+        raise HTTPException(400, f"{what} is turned off for this video (Features, on the Pipeline tab)")
 
 
 def _load(project_id: str) -> Project:
@@ -192,6 +205,8 @@ def update_project(project_id: str, payload: ProjectUpdateIn) -> Project:
             p.shows = data["shows"]
         if data.get("preset"):
             p.preset = presets.get(data["preset"]).id
+        if data.get("features"):
+            p.features = _with_features(p.features, data["features"])
         if data.get("layout"):
             p.settings.layout = data["layout"]
         if data.get("search_mode"):
@@ -215,14 +230,14 @@ def update_project(project_id: str, payload: ProjectUpdateIn) -> Project:
             p.settings.corner_radii = [min(300, max(0, int(r))) for r in radii] if radii and len(radii) == 4 else None
         if data.get("background_speed") is not None:
             p.settings.background_speed = min(1.0, max(0.25, data["background_speed"]))
+        if data.get("map_tilt") is not None:
+            p.settings.map_tilt = min(70.0, max(0.0, data["map_tilt"]))
         if data.get("wide_fill") is not None:
             p.settings.wide_fill = min(1.0, max(0.0, data["wide_fill"]))
         if data.get("wide_full_screen") is not None:
             p.settings.wide_full_screen = data["wide_full_screen"]
         if data.get("quote_cuts") is not None:
             p.settings.quote_cuts = data["quote_cuts"]
-        if data.get("music_enabled") is not None:
-            p.settings.music_enabled = data["music_enabled"]
         if data.get("music_level") is not None:
             p.settings.music_level = min(40.0, max(6.0, data["music_level"]))
         if data.get("music_library_only") is not None:
@@ -231,8 +246,6 @@ def update_project(project_id: str, payload: ProjectUpdateIn) -> Project:
             p.settings.comic_width = min(1.0, max(0.3, data["comic_width"]))
         if data.get("comic_max_speed") is not None:
             p.settings.comic_max_speed = min(2000.0, max(0.0, data["comic_max_speed"]))
-        if data.get("sound_effects") is not None:
-            p.settings.sound_effects = data["sound_effects"]
         if data.get("sfx_volume") is not None:
             p.settings.sfx_volume = min(48.0, max(0.0, data["sfx_volume"]))
         if data.get("frame_rate") is not None:
@@ -331,6 +344,8 @@ def run_stage(project_id: str, stage: str, unlock: bool = False) -> Project:
             raise HTTPException(400, "Transcribe the audio first")
         if stage == "music" and not current_lumean_api_key():
             raise HTTPException(400, "Add the Lumean API key in Settings first")
+        if stage in ("background", "music", "quotes"):
+            _require(project, stage, stage.capitalize())
         if stage in ("queries", "background", "music") and not project.beats:
             raise HTTPException(400, "Build beats first")
         if stage == "render" and not any(slot.selected is not None for b in project.beats for slot in b.slots):
@@ -353,17 +368,18 @@ def remaining_stages(project: Project, music: bool) -> list[str]:
     from app.editor.music import blocks_fit
 
     slots = [slot for beat in project.beats for slot in beat.slots]
+    scenery = project.settings.layout == "framed" and project.features.background
     done = {
         "transcribe": project.word_count > 0,
         "beats": bool(project.beats),
         "queries": bool(slots) and all(slot.text_query or slot.visual_query or slot.photo_query for slot in slots),
         "select": bool(slots) and all(slot.selected is not None for slot in slots),
-        "background": project.settings.layout != "framed" or (bool(project.beats) and all(b.backgrounds for b in project.beats)),
+        "background": not scenery or (bool(project.beats) and all(b.backgrounds for b in project.beats)),
     }
     order = ["transcribe", "beats", "queries", "select", "background"]
     first = next((n for n, stage in enumerate(order) if not done[stage]), len(order))
-    stages = [s for s in order[first:] if s != "background" or project.settings.layout == "framed"]
-    if music and (stages or not blocks_fit(project) or any(not any(t.enabled for t in b.tracks) for b in project.music)):
+    stages = [s for s in order[first:] if s != "background" or scenery]
+    if music and project.features.music and (stages or not blocks_fit(project) or any(not any(t.enabled for t in b.tracks) for b in project.music)):
         stages.append("music")
     return [*stages, "render"]
 
@@ -374,7 +390,7 @@ def run_all(project_id: str, music: bool = False) -> Project:
     project = _load(project_id)
     if not project.audio_file:
         raise HTTPException(400, "Add the narration first - upload it or voice the script")
-    if music and not current_lumean_api_key():
+    if music and project.features.music and not current_lumean_api_key():
         raise HTTPException(400, "Add the Lumean API key in Settings first")
     for stage in remaining_stages(project, music):
         project = jobs.start(project_id, stage)
@@ -498,6 +514,7 @@ def estimate_voiceover(project_id: str) -> dict:
 def generate_voiceover(project_id: str) -> Project:
     """Sends the script to be voiced - a new, paid order, replacing the current one."""
     project = _idle(project_id)
+    _require(project, "voiceover", "Voice-over")
     if not (project.script_text or "").strip():
         raise HTTPException(400, "The project has no script to voice")
     if not current_lumean_api_key():
@@ -520,7 +537,7 @@ def sync_voiceover(project_id: str) -> Project:
 @router.post("/projects/{project_id}/voiceover/fragments/{index}/redo", response_model=Project)
 def redo_voiceover_fragment(project_id: str, index: int, payload: FragmentRedoIn) -> Project:
     """Voices one fragment again, optionally with other wording, then waits for it."""
-    _idle(project_id)
+    _require(_idle(project_id), "voiceover", "Voice-over")
     _lumean(lambda: voiceover.redo_fragment(project_id, index, payload.text))
     return jobs.start(project_id, "voiceover")
 
@@ -529,7 +546,7 @@ def redo_voiceover_fragment(project_id: str, index: int, payload: FragmentRedoIn
 def retry_failed_voiceover(project_id: str) -> Project:
     """Voices every technically failed fragment again; the ones the content policy
     rejected need other wording and are left alone."""
-    _idle(project_id)
+    _require(_idle(project_id), "voiceover", "Voice-over")
     _lumean(lambda: voiceover.retry_failed(project_id))
     return jobs.start(project_id, "voiceover")
 
@@ -782,7 +799,9 @@ def candidate_still(project_id: str, beat_id: str, slot_index: int, index: int, 
         raise HTTPException(404, "No such candidate")
     candidate = beat.slots[slot_index].candidates[index]
     if candidate.kind == "map" and candidate.map is not None:
-        return _map_still(candidate.map, beat.slots[slot_index], width)
+        from app.editor import maps
+
+        return _map_still(maps.with_look(candidate.map, project.settings), beat.slots[slot_index], width)
     if candidate.kind != "video" or not Path(candidate.file_path).exists():
         raise HTTPException(404, "Not footage")
     at = still_time(candidate)
@@ -1052,7 +1071,7 @@ class SlotMapIn(BaseModel):
     places: list[str]
     route: str = ""
     pictures: list[str] = []
-    tilt: float = 50.0
+    tilt: float | None = None  # None: the project's map_tilt, from the Look tab
 
 
 @router.post("/projects/{project_id}/beats/{beat_id}/slots/{slot_index}/map", response_model=Project)
@@ -1063,11 +1082,12 @@ def set_slot_map(project_id: str, beat_id: str, slot_index: int, payload: SlotMa
     from app.editor.store import Candidate, MapShot
 
     project = _editable(project_id, beat_id, slot_index)
+    _require(project, "maps", "Maps")
     universe = store.project_universe(project)
     if universe is None or not universe.map:
         raise HTTPException(400, "This world has no map")
     shot = MapShot(map=universe.map, places=payload.places, route=payload.route, pictures=payload.pictures,
-                   tilt=min(70.0, max(0.0, payload.tilt)))
+                   tilt=None if payload.tilt is None else min(70.0, max(0.0, payload.tilt)))
     try:
         maps.waypoints(shot)
     except ValueError as error:
@@ -1276,6 +1296,37 @@ def save_look_to_preset(project_id: str) -> presets.Preset:
     return presets.update(presets.get(project.preset).id, {"look": project.settings.model_dump()})
 
 
+class ApplyPresetIn(BaseModel):
+    preset: str
+
+
+@router.post("/projects/{project_id}/apply-preset", response_model=Project)
+def apply_preset(project_id: str, payload: ApplyPresetIn) -> Project:
+    """Makes the preset this project's own and copies its features, look and voice
+    into it. The universe, shows, script and notes stay: changing them under a
+    video whose footage is already found would make that footage wrong."""
+    project = _idle(project_id)
+    preset = presets.get(payload.preset)
+    if preset.voice.get("voice_id"):
+        state = voiceover.load(project_id)
+        state.settings = voiceover.preset_voice(preset.id)
+        voiceover.save(project_id, state)
+
+    def apply(p: Project) -> None:
+        p.preset = preset.id
+        p.features = preset.features.model_copy()
+        p.settings = store.default_settings(None, preset.id)
+
+    return store.update_project(project.id, apply)
+
+
+@router.post("/projects/{project_id}/save-features-to-preset", response_model=presets.Preset)
+def save_features_to_preset(project_id: str) -> presets.Preset:
+    """Makes this project's features those of its preset. Existing projects are not changed."""
+    project = _load(project_id)
+    return presets.update(presets.get(project.preset).id, {"features": project.features.model_dump()})
+
+
 # --- presets ---------------------------------------------------------------------
 
 
@@ -1288,6 +1339,7 @@ class PresetUpdateIn(BaseModel):
     name: str | None = None
     universe: str | None = None
     shows: list[str] | None = None
+    features: dict[str, bool] | None = None  # the features to change, by name
     visual_notes: str | None = None
     footage_notes: str | None = None
     voice_instructions: str | None = None
@@ -1312,6 +1364,8 @@ def update_preset(preset_id: str, payload: PresetUpdateIn) -> presets.Preset:
     changes = payload.model_dump(exclude_none=True)
     if "name" in changes and not changes["name"].strip():
         raise HTTPException(400, "Name is required")
+    if "features" in changes:
+        changes["features"] = _with_features(presets.get(preset_id).features, changes["features"]).model_dump()
     if "universe" in changes and changes["universe"] != presets.get(preset_id).universe and "shows" not in changes:
         changes["shows"] = []  # shows of one universe make no sense in another
     try:

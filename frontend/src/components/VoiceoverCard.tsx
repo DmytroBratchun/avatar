@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import type { EditorProject, LumeanVoice, VoiceFragment, VoiceSettings } from "../api/client";
 import VoiceTextTools from "./VoiceTextTools";
 import SaveToPreset from "./SaveToPreset";
+import Help from "./Help";
 
 // ElevenLabs models Lumean offers, newest first
 const MODELS: { id: string; label: string }[] = [
@@ -274,17 +275,15 @@ export default function VoiceoverCard({
 
       <div className="card" style={{ marginTop: voiceover.has_key ? 0 : "0.75rem" }}>
         <div className="card-header">
-          <h3 style={{ margin: 0 }}>Script</h3>
+          <h3 style={{ margin: 0 }}>
+            Script
+            <Help text="Read as written. {{pause=1.5}} adds silence for free. Anything in square brackets is a direction to the voice and is not spoken - [whispers], [excited] (v3 follows these best) - so don't leave footnotes like [1] in the text." />
+          </h3>
           <span className="hint" style={{ margin: 0 }}>
             {script.trim().length.toLocaleString()} characters
           </span>
         </div>
         <textarea style={{ minHeight: "9rem", fontSize: "0.9rem" }} value={script} disabled={busy} onChange={(e) => setScript(e.target.value)} />
-        <p className="hint">
-          Read as written. <code>{"{{pause=1.5}}"}</code> adds silence for free; anything in square brackets is a
-          direction to the voice and is not spoken - <code>[whispers]</code>, <code>[excited]</code> (v3 follows these
-          best) - so don't leave footnotes like [1] in the text.
-        </p>
         <VoiceTextTools key={voiceInstructions ?? ""} text={script} disabled={busy} onChange={setScript} instructions={voiceInstructions} />
         {scriptChanged && (
           <button className="small primary" disabled={busy || saveScript.isPending} onClick={() => saveScript.mutate()}>
@@ -315,84 +314,91 @@ export default function VoiceoverCard({
           />
         )}
 
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: "0.6rem", marginTop: "0.75rem" }}>
-          <div>
-            <label>Model</label>
-            <select value={settings.model_id} disabled={busy} onChange={(e) => change({ model_id: e.target.value })}>
-              {!MODELS.some((m) => m.id === settings.model_id) && <option value={settings.model_id}>{settings.model_id}</option>}
-              {MODELS.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label title="Two-letter code of the language the script is in. Empty lets the model work it out, which is unreliable on short fragments.">
-              Language
-            </label>
-            <input
-              value={settings.language_code}
-              disabled={busy}
-              maxLength={3}
-              onChange={(e) => setSettings({ ...settings, language_code: e.target.value })}
-              onBlur={() => saveSettings.mutate(settings)}
-            />
-          </div>
-          <div>
-            <label title="Lower is more expressive and less predictable; higher is steadier and flatter.">
-              Stability {settings.stability.toFixed(2)}
-            </label>
-            {v3 ? (
-              <select value={settings.stability} disabled={busy} onChange={(e) => change({ stability: Number(e.target.value) })}>
-                {![0, 0.5, 1].includes(settings.stability) && <option value={settings.stability}>{settings.stability}</option>}
-                <option value={0}>0 - creative</option>
-                <option value={0.5}>0.5 - natural</option>
-                <option value={1}>1 - robust</option>
+        {/* the settings one rarely touches, folded; the summary shows what they are */}
+        <details style={{ marginTop: "0.6rem" }}>
+          <summary className="hint" style={{ cursor: "pointer", margin: 0 }}>
+            Advanced options · {MODELS.find((m) => m.id === settings.model_id)?.label ?? settings.model_id}
+            {settings.language_code.trim() && ` · ${settings.language_code.trim()}`} · speed {settings.speed.toFixed(2)}
+          </summary>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: "0.6rem", marginTop: "0.5rem" }}>
+            <div>
+              <label>Model</label>
+              <select value={settings.model_id} disabled={busy} onChange={(e) => change({ model_id: e.target.value })}>
+                {!MODELS.some((m) => m.id === settings.model_id) && <option value={settings.model_id}>{settings.model_id}</option>}
+                {MODELS.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
               </select>
-            ) : (
+            </div>
+            <div>
+              <label title="Two-letter code of the language the script is in. Empty lets the model work it out, which is unreliable on short fragments.">
+                Language
+              </label>
               <input
-                type="range" min={0} max={1} step={0.05} value={settings.stability} disabled={busy}
-                onChange={(e) => setSettings({ ...settings, stability: Number(e.target.value) })}
+                value={settings.language_code}
+                disabled={busy}
+                maxLength={3}
+                onChange={(e) => setSettings({ ...settings, language_code: e.target.value })}
+                onBlur={() => saveSettings.mutate(settings)}
+              />
+            </div>
+            <div>
+              <label title="Lower is more expressive and less predictable; higher is steadier and flatter.">
+                Stability {settings.stability.toFixed(2)}
+              </label>
+              {v3 ? (
+                <select value={settings.stability} disabled={busy} onChange={(e) => change({ stability: Number(e.target.value) })}>
+                  {![0, 0.5, 1].includes(settings.stability) && <option value={settings.stability}>{settings.stability}</option>}
+                  <option value={0}>0 - creative</option>
+                  <option value={0.5}>0.5 - natural</option>
+                  <option value={1}>1 - robust</option>
+                </select>
+              ) : (
+                <input
+                  type="range" min={0} max={1} step={0.05} value={settings.stability} disabled={busy}
+                  onChange={(e) => setSettings({ ...settings, stability: Number(e.target.value) })}
+                  onMouseUp={() => saveSettings.mutate(settings)}
+                  onKeyUp={() => saveSettings.mutate(settings)}
+                />
+              )}
+            </div>
+            <div>
+              <label title="How closely to keep to the original voice.">Similarity {settings.similarity_boost.toFixed(2)}</label>
+              <input
+                type="range" min={0} max={1} step={0.05} value={settings.similarity_boost} disabled={busy}
+                onChange={(e) => setSettings({ ...settings, similarity_boost: Number(e.target.value) })}
                 onMouseUp={() => saveSettings.mutate(settings)}
                 onKeyUp={() => saveSettings.mutate(settings)}
               />
-            )}
+            </div>
+            <div>
+              <label title="Exaggerates the voice's own style. 0 is the safe choice.">Style {settings.style.toFixed(2)}</label>
+              <input
+                type="range" min={0} max={1} step={0.05} value={settings.style} disabled={busy}
+                onChange={(e) => setSettings({ ...settings, style: Number(e.target.value) })}
+                onMouseUp={() => saveSettings.mutate(settings)}
+                onKeyUp={() => saveSettings.mutate(settings)}
+              />
+            </div>
+            <div>
+              <label>Speed {settings.speed.toFixed(2)}</label>
+              <input
+                type="range" min={0.7} max={1.2} step={0.01} value={settings.speed} disabled={busy}
+                onChange={(e) => setSettings({ ...settings, speed: Number(e.target.value) })}
+                onMouseUp={() => saveSettings.mutate(settings)}
+                onKeyUp={() => saveSettings.mutate(settings)}
+              />
+            </div>
           </div>
-          <div>
-            <label title="How closely to keep to the original voice.">Similarity {settings.similarity_boost.toFixed(2)}</label>
-            <input
-              type="range" min={0} max={1} step={0.05} value={settings.similarity_boost} disabled={busy}
-              onChange={(e) => setSettings({ ...settings, similarity_boost: Number(e.target.value) })}
-              onMouseUp={() => saveSettings.mutate(settings)}
-              onKeyUp={() => saveSettings.mutate(settings)}
-            />
-          </div>
-          <div>
-            <label title="Exaggerates the voice's own style. 0 is the safe choice.">Style {settings.style.toFixed(2)}</label>
-            <input
-              type="range" min={0} max={1} step={0.05} value={settings.style} disabled={busy}
-              onChange={(e) => setSettings({ ...settings, style: Number(e.target.value) })}
-              onMouseUp={() => saveSettings.mutate(settings)}
-              onKeyUp={() => saveSettings.mutate(settings)}
-            />
-          </div>
-          <div>
-            <label>Speed {settings.speed.toFixed(2)}</label>
-            <input
-              type="range" min={0.7} max={1.2} step={0.01} value={settings.speed} disabled={busy}
-              onChange={(e) => setSettings({ ...settings, speed: Number(e.target.value) })}
-              onMouseUp={() => saveSettings.mutate(settings)}
-              onKeyUp={() => saveSettings.mutate(settings)}
-            />
-          </div>
-        </div>
-        <label className="hint" style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginTop: "0.6rem", cursor: "pointer" }}>
-          <input type="checkbox" style={{ width: "auto" }} checked={settings.by_paragraph} disabled={busy} onChange={(e) => change({ by_paragraph: e.target.checked })} />
-          <span title="Cuts the script at empty lines first, so a fragment never spans two paragraphs. Each paragraph is then billed at least the service's minimum, so many short paragraphs cost more.">
-            One fragment per paragraph
-          </span>
-        </label>
+          <label className="hint" style={{ display: "flex", alignItems: "center", gap: "0.4rem", marginTop: "0.6rem", cursor: "pointer" }}>
+            <input type="checkbox" style={{ width: "auto" }} checked={settings.by_paragraph} disabled={busy} onChange={(e) => change({ by_paragraph: e.target.checked })} />
+            <span title="Cuts the script at empty lines first, so a fragment never spans two paragraphs. Each paragraph is then billed at least the service's minimum, so many short paragraphs cost more.">
+              One fragment per paragraph
+            </span>
+          </label>
+        </details>
 
         <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", marginTop: "0.75rem", flexWrap: "wrap" }}>
           <button className="small" disabled={busy || scriptChanged || !voiceover.has_key || !settings.voice_id || estimate.isPending} onClick={() => estimate.mutate()}>
@@ -402,10 +408,13 @@ export default function VoiceoverCard({
             className="small primary"
             disabled={busy || scriptChanged || !voiceover.has_key || !settings.voice_id || !script.trim()}
             onClick={() => generate.mutate()}
-            title="Sends the whole script to be voiced. Paid from the Lumean subscription."
+            title={state.order_id ? "Voices the whole script again, replacing the current voice-over. Paid from the Lumean subscription." : "Sends the whole script to be voiced. Paid from the Lumean subscription."}
           >
-            {state.order_id ? "Voice the whole script again (paid)" : "Voice the script (paid)"}
+            {state.order_id ? "Voice again (paid)" : "Voice the script (paid)"}
           </button>
+          <span style={{ marginLeft: "auto" }}>
+            <SaveToPreset project={project} what="voice" save={api.saveVoiceToPreset} disabled={busy || !settings.voice_id || saveSettings.isPending} />
+          </span>
           {scriptChanged && <span className="hint" style={{ margin: 0 }}>Save the script first.</span>}
           {!scriptChanged && voiceover.has_key && !settings.voice_id && (
             <span className="hint" style={{ margin: 0 }}>Choose a voice above first - nothing is voiced until you press the button.</span>
@@ -426,7 +435,6 @@ export default function VoiceoverCard({
               ` · fragments ${estimate.data.blocked_fragments.join(", ")} were rejected by the content policy before - reword them first`}
           </p>
         )}
-        <SaveToPreset project={project} what="voice" save={api.saveVoiceToPreset} disabled={busy || !settings.voice_id || saveSettings.isPending} onChange={onChange} />
       </div>
 
       {state.order_id && (
